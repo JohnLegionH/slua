@@ -1,0 +1,412 @@
+Third-party notices for ngc-host (slua_shim)
+
+slua_shim is built from the SLua tree (Linden Lab's fork of Luau) plus the
+files under ngc-host/. Every part that is compiled into the shared library is
+listed below with its licence. Notices are reproduced exactly as the source
+files carry them. The test project and its packages (xunit and the .NET test
+SDK) are not shipped with the library.
+
+Parts compiled into the library:
+  SLua VM, Compiler, Ast, Bytecode, Common, LSLBuiltins, Executor   MIT
+  Lua (the VM descends from Lua 5.1)                                 MIT
+  Ares (VM/src/ares.cpp), from Eris and Pluto                        MIT
+  lua-cjson and fpconv (VM/src/cjson)                                MIT
+  apr base64 (VM/src/apr)                                            Apache-2.0
+  y2038 excerpt (VM/src/miniy2038.cpp)                               MIT
+  Mono number formatting (VM/src/mono_floats.cpp)                    MIT
+  Tailslide (the LSL front end)                                      MIT, with public-domain
+                                                                     provenance; see below
+  Tailslide generated parser (lslmini.tab.cc / .hh)                  GPL-3.0-or-later with the
+                                                                     Bison special exception
+  Tailslide generated scanner (lslmini.flex.cc)                      flex output, no notice
+  Tailslide bitstream.hh                                             BSD-3-Clause
+  Tailslide portable_endian.hh                                       public domain
+  builtins.txt (embedded function and constant list)                 from lsl-definitions, MIT
+  ngc-host (shim, managed wrapper, build files)                      MIT, Copyright (c) 2026 Legion Builds
+
+==============================================================================
+SLua, Luau and the Lua heritage (LICENSE.txt)
+Licence: MIT
+==============================================================================
+MIT License
+
+Copyright (c) 2025 Linden Lab
+Copyright (c) 2019-2026 Roblox Corporation
+Copyright (c) 1994–2019 Lua.org, PUC-Rio.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+==============================================================================
+Lua (lua_LICENSE.txt)
+Licence: MIT
+==============================================================================
+Copyright © 1994–2019 Lua.org, PUC-Rio.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. 
+
+==============================================================================
+Ares / Eris / Pluto (VM/src/ares.cpp, header)
+Licence: MIT
+==============================================================================
+/*
+Ares - Heavy-duty persistence for Luau - Based on Eris, based on Pluto
+Copyright (c) 2022 by Harold Cindy
+Copyright (c) 2013-2015 by Florian Nuecke.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+*/
+
+/* The API still uses the "eris" prefix throughout, and uses the old whitespace
+ * style to make diffing against Eris proper easier.
+ */
+
+/* Standard library headers. */
+#include <cstdio>
+
+==============================================================================
+lua-cjson (VM/src/cjson/LICENSE)
+Licence: MIT
+==============================================================================
+Copyright (c) 2010-2012  Mark Pulford <mark@kyne.com.au>
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+==============================================================================
+fpconv (VM/src/cjson/fpconv.cpp, header)
+Licence: MIT
+==============================================================================
+/* fpconv - Floating point conversion routines
+ *
+ * Copyright (c) 2011-2012  Mark Pulford <mark@kyne.com.au>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be
+ * included in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+/* JSON uses a '.' decimal separator. strtod() / sprintf() under C libraries
+ * with locale support will break when the decimal separator is a comma.
+ *
+ * fpconv_* will around these issues with a translation buffer if required.
+
+==============================================================================
+apr base64 (VM/src/apr/apr_base64.cpp, header)
+Licence: Apache-2.0 (full text: ngc-host/licenses/Apache-2.0.txt; the source ships no NOTICE file)
+==============================================================================
+/* Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+==============================================================================
+y2038 excerpt (VM/src/miniy2038.cpp, header)
+Licence: MIT
+==============================================================================
+// ============================================================================
+// Extracted from y2038 library (https://github.com/evalEmpire/y2038)
+// Copyright (c) 2007-2010 Michael G Schwern
+// Licensed under MIT License
+// Note that this is a significantly stripped version, with a lot of macros expanded / removed.
+// It's placed somewhat haphazardly because I do not love it. I will be happy to get
+
+==============================================================================
+Mono number formatting (VM/src/mono_floats.cpp, header)
+Licence: MIT (X11 style), full text below as carried by the file
+==============================================================================
+//
+// Adapted from System.NumberFormatter.cs to mimic behavior of F5 and F6 format specifiers.
+//
+// Author:
+//   Kazuki Oikawa (kazuki@panicode.com)
+//   Eyal Alaluf (eyala@mainsoft.com)
+//
+// Copyright (C) 2004 Novell, Inc (http://www.novell.com)
+// Copyright (C) 2008 Mainsoft Co. (http://www.mainsoft.com)
+// Copyright (C) 2024 Harold Cindy
+//
+// Permission is hereby granted, free of charge, to any person obtaining
+// a copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to
+// permit persons to whom the Software is furnished to do so, subject to
+// the following conditions:
+// 
+// The above copyright notice and this permission notice shall be
+// included in all copies or substantial portions of the Software.
+// 
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+// LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+// OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+// WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+//
+
+==============================================================================
+Tailslide (Tailslide/LICENSE)
+Licence: MIT (the file has no copyright line)
+==============================================================================
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+==============================================================================
+Tailslide (Tailslide/NOTICE.txt)
+Licence: public domain unless otherwise noted; grammar files based on samples from Linden Lab
+==============================================================================
+lslint is a tool to check the syntactic and semantic validity of Second Life
+LSL scripts.
+
+
+
+COMPILING:
+make should be all that's required on POSIX systems, and should also work
+under Cygwin on Windows if you fix the path to UPX.
+
+
+
+LICENSE:
+All code is public domain unless otherwise noted.
+
+LSL scripts are from various sources and the property of their respective
+owners.
+
+.l and .y files are based on samples provided by Linden Lab.
+
+
+
+WARNING:
+lslint faithfully reproduced all the quirks of the LSL compiler circa ~2006,
+like having constants as lexer tokens, events as part of the parser grammar,
+and lots of right recursion. From a compiler perspective, it does everything
+wrong, and is not recommended as a base for anything but a lint tool.
+
+
+
+SPECIAL THANKS:
+Strife Onizuka
+Howie Lament
+Cory Linden
+Huns Valen
+Doran Zemlja / Adam Wozniak
+
+
+
+SHOUT OUTS:
+Daniel Linden
+Bakuzelas Khan
+One Song
+Otacon Falcone
+Shokra Patel
+
+==============================================================================
+Tailslide grammar (Tailslide/tailslide/lslmini.y, opening comment)
+Licence: based on a grammar Linden Lab published for the community; recorded here as MIT, the licence the Linden Lab repository is understood to publish it under (not verifiable from this tree)
+==============================================================================
+%{
+// Based on a grammar file LL provided to the community before the viewer was open-sourced,
+// which was used in LSLint. Presumably public domain.
+
+==============================================================================
+Tailslide generated parser (lslmini.tab.cc and lslmini.tab.hh, header; both files carry this text)
+Licence: GPL-3.0-or-later with the Bison special exception, which allows the generated parser to be distributed under the project terms
+==============================================================================
+/* A Bison parser, made by GNU Bison 3.8.2.  */
+
+/* Bison implementation for Yacc-like parsers in C
+
+   Copyright (C) 1984, 1989-1990, 2000-2015, 2018-2021 Free Software Foundation,
+   Inc.
+
+   This program is free software: you can redistribute it and/or modify
+   it under the terms of the GNU General Public License as published by
+   the Free Software Foundation, either version 3 of the License, or
+   (at your option) any later version.
+
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU General Public License for more details.
+
+   You should have received a copy of the GNU General Public License
+   along with this program.  If not, see <https://www.gnu.org/licenses/>.  */
+
+/* As a special exception, you may create a larger work that contains
+   part or all of the Bison parser skeleton and distribute that work
+   under terms of your choice, so long as that work isn't itself a
+   parser generator using the skeleton or a modified version thereof
+   as a parser skeleton.  Alternatively, if you modify or redistribute
+   the parser skeleton itself, you may (at your option) remove this
+   special exception, which will cause the skeleton and the resulting
+   Bison output files to be licensed under the GNU General Public
+   License without this special exception.
+
+   This special exception was added by the Free Software Foundation in
+   version 2.2 of Bison.  */
+
+==============================================================================
+Tailslide bitstream.hh
+Licence: BSD-3-Clause
+==============================================================================
+/*
+Based on https://github.com/kaimast/bitstream/blob/master/include/bitstream.h
+
+BSD 3-Clause License
+
+Copyright (c) 2018, Kai Mast
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+
+* Neither the name of the copyright holder nor the names of its
+  contributors may be used to endorse or promote products derived from
+  this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+==============================================================================
+Tailslide portable_endian.hh
+Licence: public domain
+==============================================================================
+// "License": Public Domain
+// I, Mathias PanzenbAck, place this file hereby into the public domain. Use it at your own risk for whatever you like.
+// In case there are jurisdictions that don't support putting things in the public domain you can also consider it to
+// be "dual licensed" under the BSD, MIT and Apache licenses, if you want to. This code is trivial anyway. Consider it
+// an example on how to get the endian conversion functions on different platforms.
+
+Generated scanner (Tailslide/tailslide/lslmini.flex.cc)
+Produced by flex 2.6.4. The file carries no licence header and this tree has no
+statement about flex output; confirm against flex's own licence before shipping.
+
+builtins.txt (embedded function and constant list)
+Generated from lsl-definitions v0.7.0 (Linden Lab), recorded as MIT. The
+SLua repository does not carry that licence text and builtins.txt has no header,
+so the licence is taken from the project's own build record (autobuild.xml names
+LICENSES/lsl_definitions.txt). Confirm against the lsl-definitions release before
+shipping a package.
