@@ -10,6 +10,12 @@
 //    that copy their arguments into slua_value records before calling out.
 //  - A slua_vm is used by one thread at a time. A second concurrent caller is
 //    refused with SLUA_ERR_BUSY and counted (slua_busy_violations).
+//
+// Versioning rule: any change to the signature of an export, to the meaning of
+// a result code, or to the layout of slua_value or slua_step_result bumps
+// SLUA_API_VERSION. A managed host compares slua_api_version() with the
+// version it was written for before it calls anything else. Adding a new
+// export that changes nothing existing does not need a bump.
 #pragma once
 
 #include <stddef.h>
@@ -35,6 +41,17 @@
 #define SLUA_ERR_LOAD (-6)
 #define SLUA_ERR_RESTORE (-7)
 #define SLUA_ERR_STATE (-8) // call not valid in the script's current state
+#define SLUA_ERR_LIMIT (-9) // a memory limit above the ceiling, or below what the script already uses
+#define SLUA_ERR_UNSUPPORTED_FUNCTION (-10) // LSL source calls an os*, iw* or bot* function; *err names it
+
+// The API version this header describes; see the versioning rule above.
+#define SLUA_API_VERSION 2
+
+// Highest memory limit a script can have. A host may lower a limit, never raise it past this.
+#define SLUA_MEMORY_LIMIT_MAX (128 * 1024)
+
+// Most elements a list value can carry across the boundary.
+#define SLUA_MAX_LIST_ITEMS 4096
 
 // Return code a host function uses to ask for a yield instead of returning values.
 #define SLUA_RET_YIELD (-1000)
@@ -67,20 +84,27 @@
 #define SLUA_T_NUMBER 3
 #define SLUA_T_STRING 4
 #define SLUA_T_VECTOR 5
+#define SLUA_T_KEY 6      // a UUID or, in LSL, any string; carried as text in s/len
+#define SLUA_T_ROTATION 7 // v[0..3] = x, y, z, s
+#define SLUA_T_LIST 8     // len elements at items; elements are never lists
 
-// One scripting value crossing the boundary. 48 bytes, no padding surprises.
+// One scripting value crossing the boundary. 56 bytes on 64-bit targets.
+// Everything a value points at (s, items) is valid only for the duration of the
+// call it came in on; a receiver that wants to keep it copies it.
 struct slua_value
 {
     int32_t type; // SLUA_T_*
-    int32_t len;  // string byte length
+    int32_t len;  // STRING and KEY: byte length. LIST: element count
     int64_t i;    // BOOL (0/1) and INT
     double n;     // NUMBER
-    const char* s; // STRING. Valid only for the duration of the call it came in.
-    float v[4];   // VECTOR uses v[0..2]
+    const char* s; // STRING and KEY text
+    const struct slua_value* items; // LIST elements
+    float v[4];   // VECTOR uses v[0..2], ROTATION v[0..3]
 };
 
 struct slua_vm;
 struct slua_script;
+struct slua_image;
 
 // Called when a script calls a registered host function. Writes up to
 // max_rets values to rets and returns how many. Returns SLUA_RET_YIELD to
@@ -99,7 +123,15 @@ struct slua_step_result
     int32_t fault_kind; // SLUA_FAULT_*
 };
 
+// Which struct to measure in slua_struct_size.
+#define SLUA_STRUCT_VALUE 0
+#define SLUA_STRUCT_STEP_RESULT 1
+
 SLUA_API int32_t slua_version(char* buf, int32_t cap);
+// SLUA_API_VERSION of the loaded library.
+SLUA_API int32_t slua_api_version(void);
+// sizeof of a struct as the library sees it, so a host can check its own layout.
+SLUA_API int32_t slua_struct_size(int32_t which);
 SLUA_API int32_t slua_set_log(slua_log_fn fn);
 SLUA_API int32_t slua_init(void);
 
@@ -115,6 +147,13 @@ SLUA_API int32_t slua_vm_free(slua_vm* vm);
 SLUA_API int32_t slua_register_host_fn(slua_vm* vm, const char* table, const char* name, int32_t fn_id, slua_host_fn cb, void* user);
 SLUA_API int32_t slua_watchdog_stats(slua_vm* vm, uint64_t* fires, uint64_t* late_fires);
 
+// Loads an asset into an image that any number of scripts in this VM can share.
+// The image is released with slua_image_free; scripts made from it keep it alive.
+SLUA_API int32_t slua_image_new(slua_vm* vm, const uint8_t* asset, size_t len, slua_image** out);
+SLUA_API int32_t slua_image_free(slua_image* img);
+// memory_limit: 0 means the default (SLUA_MEMORY_LIMIT_MAX); above the maximum is SLUA_ERR_LIMIT.
+SLUA_API int32_t slua_script_new_from_image(slua_image* img, int32_t memory_limit, int64_t tag, slua_script** out);
+// Same as slua_image_new followed by slua_script_new_from_image, for one script.
 SLUA_API int32_t slua_script_new(slua_vm* vm, const uint8_t* asset, size_t len, int32_t memory_limit, int64_t tag, slua_script** out);
 SLUA_API int32_t slua_script_free(slua_script* s);
 // Loads the image's default state and stages the main function.
@@ -122,6 +161,14 @@ SLUA_API int32_t slua_script_start(slua_script* s);
 // One scheduling step: serve sleep, then resume the in-flight handler, or run
 // the pending state_exit / state_entry. Returns SLUA_STEP_IDLE when none.
 SLUA_API int32_t slua_step(slua_script* s, double quanta_seconds, slua_step_result* result);
+// Index of an event by its LSL name ("touch_start"), or SLUA_ERR_BAD_ARG.
+SLUA_API int32_t slua_event_index(const char* name);
+// Starts an event handler with arguments and runs its first step. Valid only
+// when the script has no handler in flight and no state change waiting (keep
+// calling slua_step until it returns SLUA_STEP_IDLE); otherwise SLUA_ERR_STATE.
+// result->status is NOT_RUN when the script has no handler for the event.
+// Later steps of the same handler go through slua_step.
+SLUA_API int32_t slua_dispatch_event(slua_script* s, int32_t event, const slua_value* args, int32_t nargs, double quanta_seconds, slua_step_result* result);
 SLUA_API int32_t slua_kill(slua_script* s);
 
 SLUA_API int32_t slua_serialize(slua_script* s, uint8_t** out, size_t* out_len);
@@ -133,5 +180,6 @@ SLUA_API int32_t slua_restore(slua_script* s, const uint8_t* data, size_t len);
 SLUA_API int32_t slua_fault(slua_script* s, int32_t* kind, char* buf, int32_t cap);
 SLUA_API int32_t slua_used_memory(slua_script* s);
 SLUA_API int32_t slua_get_memory_limit(slua_script* s);
+// SLUA_ERR_LIMIT when limit is above SLUA_MEMORY_LIMIT_MAX or below the memory the script uses now.
 SLUA_API int32_t slua_set_memory_limit(slua_script* s, int32_t limit);
 SLUA_API int32_t slua_busy_violations(void);

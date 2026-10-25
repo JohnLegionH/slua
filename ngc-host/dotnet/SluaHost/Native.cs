@@ -17,6 +17,7 @@ internal static unsafe class Native
         public long I;
         public double N;
         public byte* S;
+        public SluaValue* Items;
         public float V0, V1, V2, V3;
     }
 
@@ -40,9 +41,7 @@ internal static unsafe class Native
         _ => Value.Nil,
     };
 
-    internal delegate byte* StageFn(string s, out int len);
-
-    internal static void FromManaged(in Value m, SluaValue* o, StageFn stage)
+    internal static void FromManaged(in Value m, SluaValue* o, Arena arena)
     {
         *o = default;
         o->Type = (int)m.Type;
@@ -51,13 +50,20 @@ internal static unsafe class Native
             case ValueType.Bool:
             case ValueType.Int: o->I = m.I; break;
             case ValueType.Number: o->N = m.N; break;
-            case ValueType.String: o->S = stage(m.S ?? "", out o->Len); break;
+            case ValueType.String: o->S = arena.Utf8(m.S ?? "", out o->Len); break;
             case ValueType.Vector: o->V0 = m.X; o->V1 = m.Y; o->V2 = m.Z; break;
         }
     }
 
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_version(byte* buf, int cap);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_init();
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_api_version();
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_struct_size(int which);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_image_new(IntPtr vm, byte* asset, nuint len, IntPtr* o);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_image_free(IntPtr img);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_script_new_from_image(IntPtr img, int memLimit, long tag, IntPtr* o);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_event_index([MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_dispatch_event(IntPtr s, int ev, SluaValue* args, int nargs, double quanta, StepResultN* r);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_compile(byte* src, nuint len, int isLsl, byte** o, nuint* outLen, byte** err);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern void slua_free(void* p);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_vm_new(int watchdog, IntPtr* o);

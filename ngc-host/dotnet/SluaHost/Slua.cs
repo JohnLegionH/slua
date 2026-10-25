@@ -1,15 +1,18 @@
 // Copyright (c) 2026 Legion Builds
 // Licensed under the MIT License; see LICENSE.txt in the repository root.
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 
+[assembly: InternalsVisibleTo("SluaHost.Tests")]
+
 namespace SluaHost;
 
-public enum ValueType { Nil = 0, Bool = 1, Int = 2, Number = 3, String = 4, Vector = 5 }
+public enum ValueType { Nil = 0, Bool = 1, Int = 2, Number = 3, String = 4, Vector = 5, Key = 6, Rotation = 7, List = 8 }
 
 /// <summary>A scripting value as it crosses the native boundary.</summary>
-public readonly record struct Value(ValueType Type, long I = 0, double N = 0, string? S = null, float X = 0, float Y = 0, float Z = 0)
+public readonly record struct Value(ValueType Type, long I = 0, double N = 0, string? S = null, float X = 0, float Y = 0, float Z = 0, float W = 0, Value[]? Items = null)
 {
     public static Value Nil => default;
     public static Value Bool(bool b) => new(ValueType.Bool, b ? 1 : 0);
@@ -17,6 +20,9 @@ public readonly record struct Value(ValueType Type, long I = 0, double N = 0, st
     public static Value Num(double n) => new(ValueType.Number, 0, n);
     public static Value Str(string s) => new(ValueType.String, 0, 0, s);
     public static Value Vec(float x, float y, float z) => new(ValueType.Vector, 0, 0, null, x, y, z);
+    public static Value Key(string k) => new(ValueType.Key, 0, 0, k);
+    public static Value Rot(float x, float y, float z, float s) => new(ValueType.Rotation, 0, 0, null, x, y, z, s);
+    public static Value List(params Value[] items) => new(ValueType.List, 0, 0, null, 0, 0, 0, 0, items);
 
     public override string ToString() => Type switch
     {
@@ -26,6 +32,9 @@ public readonly record struct Value(ValueType Type, long I = 0, double N = 0, st
         ValueType.Number => $"num:{N.ToString(System.Globalization.CultureInfo.InvariantCulture)}",
         ValueType.String => $"str:{S}",
         ValueType.Vector => $"vec:<{X},{Y},{Z}>",
+        ValueType.Key => $"key:{S}",
+        ValueType.Rotation => $"rot:<{X},{Y},{Z},{W}>",
+        ValueType.List => "list:[" + string.Join(",", (Items ?? Array.Empty<Value>()).Select(v => v.ToString())) + "]",
         _ => "?",
     };
 }
@@ -96,6 +105,21 @@ public static unsafe class Host
 
     public static int BusyViolations() => Native.slua_busy_violations();
 
+    /// <summary>The API version the loaded library reports. A host written for another version must not call it.</summary>
+    public static int ApiVersion() => Native.slua_api_version();
+
+    /// <summary>sizeof of a native struct as the library sees it (0 = value, 1 = step result).</summary>
+    public static int NativeStructSize(int which) => Native.slua_struct_size(which);
+
+    /// <summary>The event's number for <see cref="Script.Dispatch"/>, from its LSL name such as "touch_start".</summary>
+    public static int EventIndex(string name)
+    {
+        Init();
+        int rc = Native.slua_event_index(name);
+        Check("slua_event_index", rc);
+        return rc;
+    }
+
     /// <summary>Compiles source to an asset. Throws SluaException (code -5) with the compiler message on failure.</summary>
     public static byte[] Compile(string source, bool lsl)
     {
@@ -152,6 +176,17 @@ public sealed unsafe class Vm : IDisposable
         return new Script(this, s);
     }
 
+    /// <summary>Loads an asset once so any number of scripts can be started from it.</summary>
+    public Image NewImage(byte[] asset)
+    {
+        IntPtr img;
+        int rc;
+        fixed (byte* ap = asset)
+            rc = Native.slua_image_new(Handle, ap, (nuint)asset.Length, &img);
+        Host.Check("slua_image_new", rc);
+        return new Image(this, img);
+    }
+
     public (ulong Fires, ulong LateFires) WatchdogStats()
     {
         ulong f = 0, l = 0;
@@ -175,47 +210,26 @@ public sealed unsafe class Vm : IDisposable
 /// <summary>Entry point native code calls for every host function call. Nothing may throw out of it.</summary>
 static unsafe class HostEntry
 {
-    // Strings handed back to native are copied by the shim before it returns,
-    // so one reusable buffer per thread is enough.
-    [ThreadStatic] static IntPtr _retBuf;
-    [ThreadStatic] static int _retCap;
-
-    static byte* Stage(string s, out int len)
-    {
-        byte[] b = Encoding.UTF8.GetBytes(s);
-        len = b.Length;
-        if (_retCap < b.Length + 1)
-        {
-            if (_retBuf != IntPtr.Zero) NativeMemory.Free((void*)_retBuf);
-            _retCap = Math.Max(b.Length + 1, 256);
-            _retBuf = (IntPtr)NativeMemory.Alloc((nuint)_retCap);
-        }
-        b.CopyTo(new Span<byte>((void*)_retBuf, b.Length));
-        ((byte*)_retBuf)[b.Length] = 0;
-        return (byte*)_retBuf;
-    }
+    // Strings and arrays handed back to native are copied by the shim before it returns, so one
+    // arena per thread, emptied at the start of the next call on that thread, is enough.
+    [ThreadStatic] static Arena? _arena;
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     public static int Call(void* user, int fnId, long tag, Native.SluaValue* args, int nargs, Native.SluaValue* rets, int maxRets)
     {
         try
         {
+            var arena = _arena ??= new Arena();
+            arena.Reset();
             var vm = (Vm)GCHandle.FromIntPtr((IntPtr)user).Target!;
             Value[] a = new Value[nargs];
             for (int k = 0; k < nargs; k++) a[k] = Native.ToManaged(args[k]);
             Value[]? r = vm.Fn(fnId)(tag, a);
             if (ReferenceEquals(r, Host.Yield)) return Host.RetYield;
             if (r == null) return 0;
-            // Only the first value can carry a string through the shared buffer.
             int n = Math.Min(r.Length, maxRets);
-            bool usedBuf = false;
             for (int k = 0; k < n; k++)
-            {
-                if (r[k].Type == ValueType.String && usedBuf)
-                    throw new InvalidOperationException("at most one string return value is supported by the spike");
-                usedBuf |= r[k].Type == ValueType.String;
-                Native.FromManaged(r[k], &rets[k], Stage);
-            }
+                Native.FromManaged(r[k], &rets[k], arena);
             return n;
         }
         catch (Exception e)
@@ -223,10 +237,34 @@ static unsafe class HostEntry
             try
             {
                 var m = new Value(ValueType.String, 0, 0, "host function failed: " + e.GetType().Name + ": " + e.Message);
-                Native.FromManaged(m, &rets[0], Stage);
+                Native.FromManaged(m, &rets[0], _arena ??= new Arena());
             }
             catch { }
             return -1;
+        }
+    }
+}
+
+/// <summary>A loaded asset shared by the scripts started from it. Scripts keep it alive after it is disposed.</summary>
+public sealed unsafe class Image : IDisposable
+{
+    readonly Vm _vm;
+    IntPtr _h;
+    internal Image(Vm vm, IntPtr h) { _vm = vm; _h = h; }
+
+    public Script NewScript(int memoryLimit = 0, long tag = 0)
+    {
+        IntPtr s;
+        Host.Check("slua_script_new_from_image", Native.slua_script_new_from_image(_h, memoryLimit, tag, &s));
+        return new Script(_vm, s);
+    }
+
+    public void Dispose()
+    {
+        if (_h != IntPtr.Zero)
+        {
+            Native.slua_image_free(_h);
+            _h = IntPtr.Zero;
         }
     }
 }
@@ -259,6 +297,24 @@ public sealed unsafe class Script : IDisposable
         }
         return last;
     }
+
+    /// <summary>
+    /// Starts an event handler with arguments and runs its first step. Only valid when the script is idle
+    /// (no handler in flight, no state change waiting); throws SluaException with code -8 otherwise.
+    /// Status NotRun means the script has no handler for the event.
+    /// </summary>
+    public StepResult Dispatch(int eventIndex, ReadOnlySpan<Value> args, double quantaSeconds = 0.01)
+    {
+        using var arena = new Arena();
+        Native.SluaValue* native = (Native.SluaValue*)arena.Alloc((nuint)(Math.Max(args.Length, 1) * sizeof(Native.SluaValue)));
+        for (int i = 0; i < args.Length; i++) Native.FromManaged(args[i], &native[i], arena);
+        Native.StepResultN r;
+        Host.Check("slua_dispatch_event", Native.slua_dispatch_event(_h, eventIndex, native, args.Length, quantaSeconds, &r));
+        return new((StepStatus)r.Status, r.NewState, r.SleepServed, (FaultKind)r.FaultKind);
+    }
+
+    public StepResult Dispatch(string eventName, ReadOnlySpan<Value> args, double quantaSeconds = 0.01) =>
+        Dispatch(Host.EventIndex(eventName), args, quantaSeconds);
 
     public void Kill() => Host.Check("slua_kill", Native.slua_kill(_h));
 

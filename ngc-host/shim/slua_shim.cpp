@@ -790,3 +790,13 @@ SLUA_API int32_t slua_busy_violations(void)
 {
     return gBusyViolations.load();
 }
+
+// ---- Stubs for the exports added in API version 2. Replaced one by one. ----
+
+SLUA_API int32_t slua_api_version(void) { return SLUA_ERR_NOT_IMPLEMENTED; }
+SLUA_API int32_t slua_struct_size(int32_t) { return SLUA_ERR_NOT_IMPLEMENTED; }
+SLUA_API int32_t slua_image_new(slua_vm*, const uint8_t*, size_t, slua_image**) { return SLUA_ERR_NOT_IMPLEMENTED; }
+SLUA_API int32_t slua_image_free(slua_image*) { return SLUA_ERR_NOT_IMPLEMENTED; }
+SLUA_API int32_t slua_script_new_from_image(slua_image*, int32_t, int64_t, slua_script**) { return SLUA_ERR_NOT_IMPLEMENTED; }
+SLUA_API int32_t slua_event_index(const char*) { return SLUA_ERR_NOT_IMPLEMENTED; }
+SLUA_API int32_t slua_dispatch_event(slua_script*, int32_t, const slua_value*, int32_t, double, slua_step_result*) { return SLUA_ERR_NOT_IMPLEMENTED; }
