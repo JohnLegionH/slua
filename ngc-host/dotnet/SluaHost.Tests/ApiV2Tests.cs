@@ -485,17 +485,30 @@ public class ApiV2Tests
             "local t = { 1, 2, 3 }\nlocal function f() return t end\nossl.Nop()\nfunction ondone() end\n" +
             string.Concat(Enumerable.Range(0, 40).Select(i => $"local function g{i}(a, b) return a * {i + 1} + b - {i} end\nossl.Nop(g{i}(1, 2))\n")) +
             "coroutine.yield()", false);
+        // The same small script as the earlier per-script measurement, for comparison.
+        byte[] small = Host.Compile("""
+            local t = { 1, 2, 3 }
+            local function f() return t end
+            ossl.Nop()
+            function ondone() end
+            coroutine.yield()
+            """, false);
         const int n = 300;
 
-        long Measure1(bool shared, out long counted, byte[]? other = null)
+        // Every population stays alive until the end: memory freed by one would otherwise be
+        // reused by the next and the resident-size difference would read as zero.
+        var scripts = new List<Script>();
+        var images = new List<Image>();
+        var vms = new List<Vm>();
+        long Populate(byte[] asset, bool shared, out long counted)
         {
-            byte[] asset = other ?? largeAsset;
-            using var vm = new Vm(Watchdog.Resident);
+            var vm = new Vm(Watchdog.Resident);
+            vms.Add(vm);
             kit.Register(vm);
-            using var image = shared ? vm.NewImage(asset) : null;
+            Image? image = shared ? vm.NewImage(asset) : null;
+            if (image != null) images.Add(image);
             GC.Collect(); GC.WaitForPendingFinalizers();
             long before = Measure.RssBytes();
-            var scripts = new List<Script>();
             counted = 0;
             for (int i = 0; i < n; i++)
             {
@@ -506,25 +519,32 @@ public class ApiV2Tests
                 scripts.Add(s);
             }
             long after = Measure.RssBytes();
-            foreach (var s in scripts) s.Dispose();
             counted /= n;
             return (after - before) / n;
         }
 
-        Measure1(false, out _); // warm up allocator
-        long privatePer = Measure1(false, out long privateCounted);
-        long sharedPer = Measure1(true, out long sharedCounted);
-        Measure.Record("b1-memory-per-script", $"private image {privatePer} bytes RSS per script, shared image {sharedPer} bytes (n={n}); counted against the limit: private {privateCounted}, shared {sharedCounted}");
-        // The same small script as the earlier per-script measurement, for comparison.
-        byte[] small = Host.Compile("""
-            local t = { 1, 2, 3 }
-            local function f() return t end
-            ossl.Nop()
-            function ondone() end
-            coroutine.yield()
-            """, false);
-        long smallPrivate = Measure1(false, out _, small), smallShared = Measure1(true, out _, small);
-        Measure.Record("b1-memory-per-script-small", $"private image {smallPrivate} bytes RSS per script, shared image {smallShared} bytes (n={n})");
-        Assert.True(sharedPer < privatePer, $"shared {sharedPer} B per script is not below private {privatePer} B");
+        try
+        {
+            // JIT and one-time setup, kept out of the measurement.
+            using (var vm = new Vm(Watchdog.Resident))
+            {
+                kit.Register(vm);
+                using var warm = vm.NewScript(largeAsset);
+                warm.Start(); warm.Step();
+            }
+            long privatePer = Populate(largeAsset, false, out long privateCounted);
+            long sharedPer = Populate(largeAsset, true, out long sharedCounted);
+            long smallPrivate = Populate(small, false, out _);
+            long smallShared = Populate(small, true, out _);
+            Measure.Record("b1-memory-per-script", $"private image {privatePer} bytes RSS per script, shared image {sharedPer} bytes (n={n}); counted against the limit: private {privateCounted}, shared {sharedCounted}");
+            Measure.Record("b1-memory-per-script-small", $"private image {smallPrivate} bytes RSS per script, shared image {smallShared} bytes (n={n})");
+            Assert.True(sharedPer < privatePer, $"shared {sharedPer} B per script is not below private {privatePer} B");
+        }
+        finally
+        {
+            foreach (var s in scripts) s.Dispose();
+            foreach (var i in images) i.Dispose();
+            foreach (var v in vms) v.Dispose();
+        }
     }
 }
