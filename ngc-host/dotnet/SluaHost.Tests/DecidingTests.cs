@@ -45,7 +45,7 @@ public class DecidingTests
         Assert.Equal(StepStatus.Ok, r.Status);
         var lines = kit.Snapshot();
         Assert.Equal("OwnerSay str:x num:3 vec:<1,2,3>", lines[0]);
-        Assert.Equal("str:Example Grid int:5 str:e true vec:<4,5,6>", lines[1]);
+        Assert.Equal("str:Example Grid num:5 str:e true vec:<4,5,6>", lines[1]);
     }
 
     [Fact]
@@ -119,12 +119,12 @@ public class DecidingTests
         r = s.Step();
         Assert.Equal(StepStatus.Preempted, r.Status); // second await inside pcall
         Assert.Equal(5, kit.Pending[77]);
-        Assert.Equal(new[] { "str:got int:42" }, kit.Snapshot());
+        Assert.Equal(new[] { "str:got num:42" }, kit.Snapshot());
 
         kit.Results[77] = Value.Int(99);
         r = s.Step();
         Assert.Equal(StepStatus.Ok, r.Status);
-        Assert.Equal(new[] { "str:got int:42", "str:got true int:99" }, kit.Snapshot());
+        Assert.Equal(new[] { "str:got num:42", "str:got true num:99" }, kit.Snapshot());
     }
 
     [Fact] public void T2_AsyncViaLuaSideYieldWrapper() => DriveAsync(AwaitWrapperLuaYield);
@@ -301,6 +301,7 @@ public class DecidingTests
     [InlineData(Watchdog.Threaded)]
     public void T4_RunawayLoopIsCutOffAndScriptCanBeKilled(Watchdog mode)
     {
+        long violationsBefore = Host.BusyViolations();
         var (vm, kit) = NewVm(mode);
         using var _ = vm;
         using var runaway = Run(vm, "while true do end", tag: 1);
@@ -321,7 +322,7 @@ public class DecidingTests
         using var other = Run(vm, "ossl.Report('healthy')", tag: 2);
         Assert.Equal(StepStatus.Ok, other.RunToIdle().Status);
         Assert.Contains("str:healthy", kit.Snapshot());
-        Assert.Equal(0, Host.BusyViolations());
+        Assert.Equal(violationsBefore, Host.BusyViolations());
     }
 
     [Theory]
@@ -331,15 +332,46 @@ public class DecidingTests
     {
         var (vm, kit) = NewVm(mode);
         using var _ = vm;
-        // pcall is a C boundary the engine cannot yield across, so it has to raise an error, then kill.
-        using var stuck = Run(vm, "pcall(function() while true do end end)", tag: 1);
-        var sw = Stopwatch.StartNew();
-        StepResult r = default;
-        for (int i = 0; i < 50 && r.Status != StepStatus.Fault; i++) r = stuck.Step(0.002);
-        sw.Stop();
-        Assert.Equal(StepStatus.Fault, r.Status);
-        Assert.Equal(FaultKind.Timeout, stuck.Fault().Kind);
-        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(5), $"took {sw.Elapsed}");
+        // A metamethod call is a boundary the engine cannot yield across (pcall, table.sort and
+        // string.gsub are not: they yield and are preempted). The engine raises an error at
+        // 3.5 times the quanta and, if the script is still stuck, kills it with a Timeout fault.
+        using (var stuck = Run(vm, "local t = setmetatable({}, { __index = function() while true do end end }); local x = t.a", tag: 1))
+        {
+            var sw = Stopwatch.StartNew();
+            var r = stuck.Step(0.002);
+            sw.Stop();
+            Assert.Equal(StepStatus.Fault, r.Status);
+            Assert.Equal(FaultKind.Timeout, stuck.Fault().Kind);
+            Assert.True(sw.Elapsed < TimeSpan.FromSeconds(2), $"took {sw.Elapsed}");
+        }
+        using var other = Run(vm, "ossl.Report('healthy')", tag: 2);
+        Assert.Equal(StepStatus.Ok, other.RunToIdle().Status);
+    }
+
+    [Theory]
+    [InlineData(Watchdog.Resident)]
+    [InlineData(Watchdog.Threaded)]
+    public void T4_ScriptThatCatchesTheTimeoutErrorIsPunishedWithSleepAndHostCanKillIt(Watchdog mode)
+    {
+        var (vm, kit) = NewVm(mode);
+        using var _ = vm;
+        // The error the engine raises is catchable. A script that catches it and carries on is not
+        // killed by the engine: each window ends at a yield point instead and the script is made to
+        // sleep in proportion to its overrun. The host stays in control and can kill it.
+        using var defiant = Run(vm, "while true do pcall(function() return setmetatable({}, { __index = function() while true do end end }).a end) end", tag: 1);
+        float slept = 0;
+        for (int i = 0; i < 6; i++)
+        {
+            var sw = Stopwatch.StartNew();
+            var r = defiant.Step(0.002);
+            sw.Stop();
+            Assert.Equal(StepStatus.Preempted, r.Status);
+            Assert.True(sw.Elapsed < TimeSpan.FromSeconds(1), $"step took {sw.Elapsed}");
+            slept += r.SleepServed;
+        }
+        Assert.True(slept > 0.05f, $"expected punishment sleep, got {slept}s");
+        defiant.Kill();
+        Assert.Equal(StepStatus.Fault, defiant.Step(0.002).Status);
 
         using var other = Run(vm, "ossl.Report('healthy')", tag: 2);
         Assert.Equal(StepStatus.Ok, other.RunToIdle().Status);

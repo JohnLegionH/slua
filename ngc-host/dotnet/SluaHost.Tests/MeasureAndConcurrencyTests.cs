@@ -194,12 +194,13 @@ public class LinuxCleanlinessAndConcurrencyTests
         var kit = new TestKit();
         using var vm = new Vm(Watchdog.Resident);
         kit.Register(vm);
-        using var spinner = vm.NewScript(Host.Compile("while true do end", false), tag: 1);
+        using var spinner = vm.NewScript(Host.Compile("ossl.Nop() while true do end", false), tag: 1);
         using var other = vm.NewScript(Host.Compile("ossl.Nop()", false), tag: 2);
         spinner.Start(); other.Start();
         long before = Host.BusyViolations();
 
         var running = Task.Run(() => spinner.Step(1.0)); // holds the VM for about a second
+        while (Interlocked.Read(ref kit.NopCalls) == 0) await Task.Delay(1); // the spinner is inside the VM now
         bool refused = false;
         var deadline = Stopwatch.StartNew();
         while (!refused && deadline.Elapsed < TimeSpan.FromSeconds(5))

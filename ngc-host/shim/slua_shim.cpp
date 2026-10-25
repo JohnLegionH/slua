@@ -1,39 +1,792 @@
 // Copyright (c) 2026 Legion Builds
 // Licensed under the MIT License; see LICENSE.txt in the repository root.
 //
-// Stub implementation: every export reports "not implemented". It exists so
-// the deciding tests can be committed and run red before the real shim.
+// Flat C interface over the SLua Executor. See slua_shim.h for the contract.
+// Nothing in this file lets a C++ exception leave an exported function, and
+// the managed side never receives a lua_State.
 #include "slua_shim.h"
 
-#define STUB(...)                                   \
-    try                                             \
-    {                                               \
-        (void)sizeof(int[1]);                       \
-        return SLUA_ERR_NOT_IMPLEMENTED;            \
-    }                                               \
-    catch (...)                                     \
-    {                                               \
-        return SLUA_ERR_EXCEPTION;                  \
+#include "lua.h"
+#include "lualib.h"
+#include "luacode.h"
+#include "llsl.h"
+
+#include "Luau/BytecodeHeader.h"
+#include "Luau/Common.h"
+#include "Luau/Compiler.h"
+#include "Luau/Executor.h"
+#include "Luau/LSLBuiltins.h"
+#include "Luau/LSLCompiler.h"
+#include "Luau/ParseResult.h"
+#include "Luau/Script.h"
+
+#include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
+
+#ifndef SLUA_RUNTIME_COMMIT
+#define SLUA_RUNTIME_COMMIT "unknown"
+#endif
+
+using namespace Luau::Executor;
+
+namespace
+{
+
+constexpr int32_t kAbiVersion = 1;
+constexpr int kMaxHostArgs = 32;
+constexpr int kMaxHostRets = 8;
+
+std::atomic<int32_t> gBusyViolations{0};
+std::atomic<slua_log_fn> gLog{nullptr};
+std::once_flag gInitOnce;
+
+void logAdapter(LogLevel level, const char* source, const char* message)
+{
+    if (slua_log_fn fn = gLog.load())
+        fn((int32_t)level, source, message);
+}
+
+double clockProvider(lua_State*)
+{
+    return lua_clock();
+}
+
+struct HostFnRec
+{
+    std::string table;
+    std::string name;
+    int32_t id;
+    slua_host_fn cb;
+    void* user;
+};
+
+} // namespace
+
+struct slua_vm : public Provisioner<Script>
+{
+    explicit slua_vm(const HostCallbacks& callbacks)
+        : Provisioner<Script>(callbacks)
+    {
     }
 
-SLUA_API int32_t slua_version(char*, int32_t) { STUB() }
-SLUA_API int32_t slua_set_log(slua_log_fn) { STUB() }
-SLUA_API int32_t slua_init(void) { STUB() }
-SLUA_API int32_t slua_compile(const char*, size_t, int32_t, uint8_t**, size_t*, char**) { STUB() }
-SLUA_API void slua_free(void*) {}
-SLUA_API int32_t slua_vm_new(int32_t, slua_vm**) { STUB() }
-SLUA_API int32_t slua_vm_free(slua_vm*) { STUB() }
-SLUA_API int32_t slua_register_host_fn(slua_vm*, const char*, const char*, int32_t, slua_host_fn, void*) { STUB() }
-SLUA_API int32_t slua_watchdog_stats(slua_vm*, uint64_t*, uint64_t*) { STUB() }
-SLUA_API int32_t slua_script_new(slua_vm*, const uint8_t*, size_t, int32_t, int64_t, slua_script**) { STUB() }
-SLUA_API int32_t slua_script_free(slua_script*) { STUB() }
-SLUA_API int32_t slua_script_start(slua_script*) { STUB() }
-SLUA_API int32_t slua_step(slua_script*, double, slua_step_result*) { STUB() }
-SLUA_API int32_t slua_kill(slua_script*) { STUB() }
-SLUA_API int32_t slua_serialize(slua_script*, uint8_t**, size_t*) { STUB() }
-SLUA_API int32_t slua_restore(slua_script*, const uint8_t*, size_t) { STUB() }
-SLUA_API int32_t slua_fault(slua_script*, int32_t*, char*, int32_t) { STUB() }
-SLUA_API int32_t slua_used_memory(slua_script*) { STUB() }
-SLUA_API int32_t slua_get_memory_limit(slua_script*) { STUB() }
-SLUA_API int32_t slua_set_memory_limit(slua_script*, int32_t) { STUB() }
-SLUA_API int32_t slua_busy_violations(void) { STUB() }
+    std::vector<HostFnRec> fns;
+    // The environments this VM has made, one per flavour and API version.
+    std::map<std::pair<bool, uint32_t>, std::shared_ptr<IEnvironment>> environments;
+    // One thread at a time. Set while any export is working on this VM or its scripts.
+    std::atomic<int> busy{0};
+    int liveScripts = 0;
+    uint64_t fnHash = 0;
+};
+
+struct slua_script
+{
+    slua_vm* vm = nullptr;
+    std::shared_ptr<IImage> image;
+    std::shared_ptr<Script> script;
+    int64_t tag = 0;
+};
+
+namespace
+{
+
+// Refuses a second concurrent caller instead of corrupting the VM.
+class VmGuard
+{
+public:
+    explicit VmGuard(slua_vm* vm)
+        : mVm(vm)
+    {
+        int expected = 0;
+        mOk = vm->busy.compare_exchange_strong(expected, 1);
+        if (!mOk)
+            gBusyViolations.fetch_add(1);
+    }
+    ~VmGuard()
+    {
+        if (mOk)
+            mVm->busy.store(0);
+    }
+    bool ok() const { return mOk; }
+
+private:
+    slua_vm* mVm;
+    bool mOk;
+};
+
+uint64_t fnvHash(const std::string& s)
+{
+    uint64_t h = 1469598103934665603ULL;
+    for (unsigned char c : s)
+    {
+        h ^= c;
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+// Hash of the bound function list: sorted "table.name" entries, so the order
+// functions were registered in does not matter.
+uint64_t hashFunctionList(const std::vector<HostFnRec>& fns)
+{
+    std::vector<std::string> names;
+    for (const HostFnRec& f : fns)
+        names.push_back(f.table + "." + f.name);
+    std::sort(names.begin(), names.end());
+    std::string all;
+    for (const std::string& n : names)
+    {
+        all += n;
+        all += '\n';
+    }
+    return fnvHash(all);
+}
+
+// Copies the script's arguments into flat records, calls the managed host
+// function, and pushes whatever it returns. Runs on the script's thread,
+// inside lua_resume. luaL_errorL unwinds only native frames up to the
+// Executor's own catch of lua_exception.
+int hostTrampoline(lua_State* L)
+{
+    const int index = (int)lua_tonumber(L, lua_upvalueindex(1));
+    Script* script = Script::fromLuaState(L);
+    if (script == nullptr)
+        luaL_errorL(L, "host function called outside a script");
+    slua_vm* vm = dynamic_cast<slua_vm*>(&script->getProvisioner());
+    if (vm == nullptr || index < 0 || (size_t)index >= vm->fns.size())
+        luaL_errorL(L, "host function is not bound");
+    const HostFnRec& fn = vm->fns[(size_t)index];
+    slua_script* owner = static_cast<slua_script*>(script->getHostContext());
+    const int64_t tag = owner ? owner->tag : 0;
+
+    const int nargs = lua_gettop(L);
+    if (nargs > kMaxHostArgs)
+        luaL_errorL(L, "too many arguments (%d)", nargs);
+    slua_value args[kMaxHostArgs];
+    for (int i = 0; i < nargs; ++i)
+    {
+        slua_value& v = args[i];
+        std::memset(&v, 0, sizeof(v));
+        const int idx = i + 1;
+        switch (lua_type(L, idx))
+        {
+        case LUA_TNIL:
+            v.type = SLUA_T_NIL;
+            break;
+        case LUA_TBOOLEAN:
+            v.type = SLUA_T_BOOL;
+            v.i = lua_toboolean(L, idx) ? 1 : 0;
+            break;
+        case LUA_TNUMBER:
+            v.type = SLUA_T_NUMBER;
+            v.n = lua_tonumber(L, idx);
+            break;
+        case LUA_TINTEGER:
+        {
+            int isint = 0;
+            v.type = SLUA_T_INT;
+            v.i = lua_tointeger64(L, idx, &isint);
+            break;
+        }
+        case LUA_TSTRING:
+        {
+            size_t len = 0;
+            v.type = SLUA_T_STRING;
+            v.s = lua_tolstring(L, idx, &len);
+            v.len = (int32_t)len;
+            break;
+        }
+        case LUA_TVECTOR:
+        {
+            const float* f = lua_tovector(L, idx);
+            v.type = SLUA_T_VECTOR;
+            v.v[0] = f[0];
+            v.v[1] = f[1];
+            v.v[2] = f[2];
+            break;
+        }
+        default:
+            luaL_errorL(L, "argument %d: unsupported type %s", idx, luaL_typename(L, idx));
+        }
+    }
+
+    slua_value rets[kMaxHostRets];
+    std::memset(rets, 0, sizeof(rets));
+    const int32_t n = fn.cb(fn.user, fn.id, tag, args, nargs, rets, kMaxHostRets);
+
+    if (n == SLUA_RET_YIELD)
+        return lua_yield(L, 0);
+    if (n < 0)
+    {
+        char msg[512];
+        if (rets[0].type == SLUA_T_STRING && rets[0].s != nullptr)
+            std::snprintf(msg, sizeof(msg), "%.*s", rets[0].len < 500 ? rets[0].len : 500, rets[0].s);
+        else
+            std::snprintf(msg, sizeof(msg), "host function failed (%d)", (int)n);
+        luaL_errorL(L, "%s", msg);
+    }
+    if (n > kMaxHostRets)
+        luaL_errorL(L, "host function returned too many values");
+
+    for (int i = 0; i < n; ++i)
+    {
+        const slua_value& v = rets[i];
+        switch (v.type)
+        {
+        case SLUA_T_NIL:
+            lua_pushnil(L);
+            break;
+        case SLUA_T_BOOL:
+            lua_pushboolean(L, v.i != 0);
+            break;
+        case SLUA_T_INT:
+            luaSL_pushnativeinteger(L, (int)v.i);
+            break;
+        case SLUA_T_NUMBER:
+            lua_pushnumber(L, v.n);
+            break;
+        case SLUA_T_STRING:
+            lua_pushlstring(L, v.s ? v.s : "", (size_t)v.len);
+            break;
+        case SLUA_T_VECTOR:
+            lua_pushvector(L, v.v[0], v.v[1], v.v[2]);
+            break;
+        default:
+            luaL_errorL(L, "host function returned unsupported type %d", v.type);
+        }
+    }
+    return n;
+}
+
+void populateEnvironment(IEnvironment& environment, lua_State* L)
+{
+    luaSL_set_constant_globals(L);
+    slua_vm* vm = dynamic_cast<slua_vm*>(&environment.getProvisioner());
+    if (vm == nullptr)
+        return;
+    for (size_t i = 0; i < vm->fns.size(); ++i)
+    {
+        const HostFnRec& f = vm->fns[i];
+        lua_getglobal(L, f.table.c_str());
+        if (!lua_istable(L, -1))
+        {
+            lua_pop(L, 1);
+            lua_newtable(L);
+            lua_pushvalue(L, -1);
+            lua_setglobal(L, f.table.c_str());
+        }
+        // The upvalue is the index into the VM's function table. Ares sees the
+        // closure as a permanent because it is reachable from _G by name.
+        lua_pushnumber(L, (double)i);
+        lua_pushcclosurek(L, hostTrampoline, f.name.c_str(), 1, nullptr);
+        lua_rawsetfield(L, -2, f.name.c_str());
+        lua_pop(L, 1);
+    }
+}
+
+// Saved-state header: "SLSH", u32 version, u16 commit length, commit, u64 function-list hash.
+constexpr uint32_t kStateVersion = 1;
+
+void put32(std::string& s, uint32_t v) { s.append((const char*)&v, 4); }
+void put16(std::string& s, uint16_t v) { s.append((const char*)&v, 2); }
+void put64(std::string& s, uint64_t v) { s.append((const char*)&v, 8); }
+
+char* dupString(const std::string& s)
+{
+    char* p = (char*)std::malloc(s.size() + 1);
+    if (p == nullptr)
+        throw std::bad_alloc();
+    std::memcpy(p, s.data(), s.size());
+    p[s.size()] = 0;
+    return p;
+}
+
+} // namespace
+
+#define SLUA_TRY try {
+#define SLUA_CATCH                                                \
+    }                                                             \
+    catch (...)                                                   \
+    {                                                             \
+        return SLUA_ERR_EXCEPTION;                                \
+    }
+
+SLUA_API int32_t slua_version(char* buf, int32_t cap)
+{
+    SLUA_TRY
+    if (buf == nullptr || cap <= 0)
+        return SLUA_ERR_BAD_ARG;
+    std::snprintf(buf, (size_t)cap, "runtime=%s abi=%d", SLUA_RUNTIME_COMMIT, (int)kAbiVersion);
+    return SLUA_OK;
+    SLUA_CATCH
+}
+
+SLUA_API int32_t slua_set_log(slua_log_fn fn)
+{
+    SLUA_TRY
+    gLog.store(fn);
+    return SLUA_OK;
+    SLUA_CATCH
+}
+
+SLUA_API int32_t slua_init(void)
+{
+    SLUA_TRY
+    std::call_once(gInitOnce, []() {
+        Luau::setRequiredSLuaFlags();
+        luauSL_init_global_builtins(nullptr);
+        logCallback() = logAdapter;
+    });
+    return SLUA_OK;
+    SLUA_CATCH
+}
+
+SLUA_API void slua_free(void* p)
+{
+    std::free(p);
+}
+
+SLUA_API int32_t slua_compile(const char* src, size_t len, int32_t is_lsl, uint8_t** out, size_t* out_len, char** err)
+{
+    SLUA_TRY
+    if (src == nullptr || out == nullptr || out_len == nullptr || err == nullptr)
+        return SLUA_ERR_BAD_ARG;
+    *out = nullptr;
+    *out_len = 0;
+    *err = nullptr;
+    slua_init();
+
+    std::string source(src, len);
+    std::string asset;
+    try
+    {
+        if (is_lsl)
+        {
+            asset = compileLSLAssetOrThrow(source, 0);
+        }
+        else
+        {
+            Luau::CompileOptions copts = {};
+            copts.optimizationLevel = 1;
+            copts.debugLevel = 1;
+            copts.typeInfoLevel = 1;
+            copts.libraryMemberConstantCb = &luauSL_lookup_constant_cb;
+            asset = Luau::compileAssetOrThrow(source, 0, copts);
+        }
+    }
+    catch (Luau::ParseErrors& e)
+    {
+        std::string msg;
+        for (const Luau::ParseError& pe : e.getErrors())
+            msg += std::to_string(pe.getLocation().begin.line + 1) + ": " + pe.what() + "\n";
+        *err = dupString(msg);
+        return SLUA_ERR_COMPILE;
+    }
+    catch (Luau::CompileError& e)
+    {
+        *err = dupString(std::to_string(e.getLocation().begin.line + 1) + ": " + e.what());
+        return SLUA_ERR_COMPILE;
+    }
+    catch (std::exception& e)
+    {
+        *err = dupString(e.what());
+        return SLUA_ERR_COMPILE;
+    }
+
+    uint8_t* mem = (uint8_t*)std::malloc(asset.size() ? asset.size() : 1);
+    if (mem == nullptr)
+        return SLUA_ERR_EXCEPTION;
+    std::memcpy(mem, asset.data(), asset.size());
+    *out = mem;
+    *out_len = asset.size();
+    return SLUA_OK;
+    SLUA_CATCH
+}
+
+SLUA_API int32_t slua_vm_new(int32_t watchdog_mode, slua_vm** out)
+{
+    SLUA_TRY
+    if (out == nullptr)
+        return SLUA_ERR_BAD_ARG;
+    *out = nullptr;
+    slua_init();
+    HostCallbacks callbacks;
+    callbacks.clockProvider = clockProvider;
+    callbacks.populateEnvironment = populateEnvironment;
+    switch (watchdog_mode)
+    {
+    case SLUA_WATCHDOG_RESIDENT:
+        callbacks.interruptInstallPolicy = InterruptInstallPolicy::Resident;
+        break;
+    case SLUA_WATCHDOG_THREADED:
+        callbacks.interruptInstallPolicy = InterruptInstallPolicy::Threaded;
+        break;
+    default:
+        break;
+    }
+    *out = new slua_vm(callbacks);
+    return SLUA_OK;
+    SLUA_CATCH
+}
+
+SLUA_API int32_t slua_vm_free(slua_vm* vm)
+{
+    SLUA_TRY
+    if (vm == nullptr)
+        return SLUA_ERR_BAD_ARG;
+    {
+        VmGuard guard(vm);
+        if (!guard.ok())
+            return SLUA_ERR_BUSY;
+        // Scripts hold their image, and through it the environment, so freeing
+        // the VM under live scripts would leave them pointing at nothing.
+        if (vm->liveScripts != 0)
+            return SLUA_ERR_STATE;
+        vm->environments.clear();
+    }
+    delete vm;
+    return SLUA_OK;
+    SLUA_CATCH
+}
+
+SLUA_API int32_t slua_register_host_fn(slua_vm* vm, const char* table, const char* name, int32_t fn_id, slua_host_fn cb, void* user)
+{
+    SLUA_TRY
+    if (vm == nullptr || table == nullptr || name == nullptr || cb == nullptr)
+        return SLUA_ERR_BAD_ARG;
+    VmGuard guard(vm);
+    if (!guard.ok())
+        return SLUA_ERR_BUSY;
+    // Functions are bound into an environment when it is created.
+    if (!vm->environments.empty())
+        return SLUA_ERR_STATE;
+    vm->fns.push_back(HostFnRec{table, name, fn_id, cb, user});
+    vm->fnHash = hashFunctionList(vm->fns);
+    return SLUA_OK;
+    SLUA_CATCH
+}
+
+SLUA_API int32_t slua_watchdog_stats(slua_vm* vm, uint64_t* fires, uint64_t* late_fires)
+{
+    SLUA_TRY
+    if (vm == nullptr || fires == nullptr || late_fires == nullptr)
+        return SLUA_ERR_BAD_ARG;
+    WatchdogStats st = vm->getWatchdogStats();
+    *fires = st.fires;
+    *late_fires = st.lateFires;
+    return SLUA_OK;
+    SLUA_CATCH
+}
+
+SLUA_API int32_t slua_script_new(slua_vm* vm, const uint8_t* asset, size_t len, int32_t memory_limit, int64_t tag, slua_script** out)
+{
+    SLUA_TRY
+    if (vm == nullptr || asset == nullptr || out == nullptr)
+        return SLUA_ERR_BAD_ARG;
+    *out = nullptr;
+    VmGuard guard(vm);
+    if (!guard.ok())
+        return SLUA_ERR_BUSY;
+
+    Luau::BytecodeHeader header;
+    size_t start = 0;
+    if (!Luau::readBytecodeHeader((const char*)asset, len, header, start))
+        return SLUA_ERR_LOAD;
+
+    auto key = std::make_pair(header.isLSL, header.apiVersion);
+    auto it = vm->environments.find(key);
+    if (it == vm->environments.end())
+        it = vm->environments.emplace(key, vm->createEnvironment(header.isLSL, header.apiVersion)).first;
+
+    ImageConfig image_config;
+    image_config.asset = (const char*)asset;
+    image_config.assetSize = len;
+    image_config.name = "asset";
+    std::shared_ptr<IImage> image = vm->buildImage(it->second, image_config);
+    if (image == nullptr || !image->isValid())
+        return SLUA_ERR_LOAD;
+
+    auto holder = std::make_unique<slua_script>();
+    holder->vm = vm;
+    holder->tag = tag;
+    holder->image = image;
+    ScriptConfig config;
+    config.scriptId = "script";
+    config.memoryLimit = memory_limit > 0 ? memory_limit : kDefaultMemoryLimit;
+    config.hostContext = holder.get();
+    holder->script = vm->instantiateScript(image, config);
+    if (holder->script == nullptr)
+        return SLUA_ERR_LOAD;
+    vm->liveScripts++;
+    *out = holder.release();
+    return SLUA_OK;
+    SLUA_CATCH
+}
+
+SLUA_API int32_t slua_script_free(slua_script* s)
+{
+    SLUA_TRY
+    if (s == nullptr)
+        return SLUA_ERR_BAD_ARG;
+    {
+        VmGuard guard(s->vm);
+        if (!guard.ok())
+            return SLUA_ERR_BUSY;
+        s->script.reset();
+        s->image.reset();
+        s->vm->liveScripts--;
+    }
+    delete s;
+    return SLUA_OK;
+    SLUA_CATCH
+}
+
+SLUA_API int32_t slua_script_start(slua_script* s)
+{
+    SLUA_TRY
+    if (s == nullptr)
+        return SLUA_ERR_BAD_ARG;
+    VmGuard guard(s->vm);
+    if (!guard.ok())
+        return SLUA_ERR_BUSY;
+    return s->script->loadDefaultState() ? SLUA_OK : SLUA_ERR_LOAD;
+    SLUA_CATCH
+}
+
+SLUA_API int32_t slua_step(slua_script* s, double quanta_seconds, slua_step_result* result)
+{
+    SLUA_TRY
+    if (s == nullptr || result == nullptr || quanta_seconds <= 0.0)
+        return SLUA_ERR_BAD_ARG;
+    VmGuard guard(s->vm);
+    if (!guard.ok())
+        return SLUA_ERR_BUSY;
+    Script& script = *s->script;
+    std::memset(result, 0, sizeof(*result));
+
+    if (script.getFaultKind() != FaultKind::None)
+    {
+        result->status = SLUA_STEP_FAULT;
+        result->fault_kind = (int32_t)script.getFaultKind();
+        return SLUA_OK;
+    }
+    if (!script.hasInstance())
+        return SLUA_ERR_STATE;
+
+    // The engine asks for sleeps (ll.Sleep, punishment for long runs). A real
+    // scheduler would delay the next step; the spike serves them at once and
+    // reports how long they were.
+    if (script.getSleep() > 0.0f)
+    {
+        result->sleep_served = script.getSleep();
+        script.setSleep(0.0f);
+    }
+
+    RunResult rr;
+    for (;;)
+    {
+        int event = Luau::LSLEvent::None;
+        if (!script.isHandlerActive())
+        {
+            // The engine only pends state_exit when the departing state handles it.
+            if (script.isStateChangePending() && !(script.getCurrentEvents() & Luau::LSLEventBit::StateExit))
+                script.nextState();
+
+            if (script.getCurrentEvents() & Luau::LSLEventBit::StateExit)
+                event = Luau::LSLEvent::StateExit;
+            else if (script.getCurrentEvents() & Luau::LSLEventBit::StateEntry)
+                event = Luau::LSLEvent::StateEntry;
+            else
+            {
+                result->status = SLUA_STEP_IDLE;
+                return SLUA_OK;
+            }
+
+            // A state without the handler just drops the event.
+            const uint64_t bit = Luau::lslEventBit(event);
+            if (!(script.getEventHandlers() & bit))
+            {
+                script.setCurrentEvents(script.getCurrentEvents() & ~bit);
+                continue;
+            }
+        }
+        RunWindow window(script, quanta_seconds);
+        rr = event != Luau::LSLEvent::None ? script.callEventHandler(event, nullptr) : script.resumeEventHandler();
+        break;
+    }
+    result->status = (int32_t)rr.status;
+    result->new_state = rr.newState;
+    result->fault_kind = (int32_t)script.getFaultKind();
+    return SLUA_OK;
+    SLUA_CATCH
+}
+
+SLUA_API int32_t slua_kill(slua_script* s)
+{
+    SLUA_TRY
+    if (s == nullptr)
+        return SLUA_ERR_BAD_ARG;
+    VmGuard guard(s->vm);
+    if (!guard.ok())
+        return SLUA_ERR_BUSY;
+    if (s->script->isHandlerActive())
+        s->script->abortHandler();
+    else if (s->script->getFaultKind() == FaultKind::None)
+        s->script->setFault(FaultKind::Unknown, "script killed by host");
+    return SLUA_OK;
+    SLUA_CATCH
+}
+
+SLUA_API int32_t slua_serialize(slua_script* s, uint8_t** out, size_t* out_len)
+{
+    SLUA_TRY
+    if (s == nullptr || out == nullptr || out_len == nullptr)
+        return SLUA_ERR_BAD_ARG;
+    *out = nullptr;
+    *out_len = 0;
+    VmGuard guard(s->vm);
+    if (!guard.ok())
+        return SLUA_ERR_BUSY;
+    std::string payload;
+    if (!s->script->serializeState(payload))
+        return SLUA_ERR_STATE;
+
+    std::string blob = "SLSH";
+    put32(blob, kStateVersion);
+    const std::string commit = SLUA_RUNTIME_COMMIT;
+    put16(blob, (uint16_t)commit.size());
+    blob += commit;
+    put64(blob, s->vm->fnHash);
+    blob += payload;
+
+    uint8_t* mem = (uint8_t*)std::malloc(blob.size());
+    if (mem == nullptr)
+        return SLUA_ERR_EXCEPTION;
+    std::memcpy(mem, blob.data(), blob.size());
+    *out = mem;
+    *out_len = blob.size();
+    return SLUA_OK;
+    SLUA_CATCH
+}
+
+SLUA_API int32_t slua_restore(slua_script* s, const uint8_t* data, size_t len)
+{
+    SLUA_TRY
+    if (s == nullptr || data == nullptr)
+        return SLUA_ERR_BAD_ARG;
+    VmGuard guard(s->vm);
+    if (!guard.ok())
+        return SLUA_ERR_BUSY;
+    if (s->script->hasInstance())
+        return SLUA_ERR_STATE;
+
+    // Header: a blob that is not ours at all is an error; a blob from another
+    // runtime or another bound function list starts the script fresh.
+    size_t pos = 0;
+    auto need = [&](size_t n) { return len - pos >= n; };
+    if (!need(4) || std::memcmp(data, "SLSH", 4) != 0)
+        return SLUA_ERR_RESTORE;
+    pos = 4;
+    if (!need(4))
+        return SLUA_ERR_RESTORE;
+    uint32_t version;
+    std::memcpy(&version, data + pos, 4);
+    pos += 4;
+    if (version != kStateVersion)
+    {
+        logWarn("shim", "saved state has format version %u, this build writes %u: starting the script fresh", version, kStateVersion);
+        return s->script->loadDefaultState() ? SLUA_RESTORED_FRESH : SLUA_ERR_LOAD;
+    }
+    if (!need(2))
+        return SLUA_ERR_RESTORE;
+    uint16_t commit_len;
+    std::memcpy(&commit_len, data + pos, 2);
+    pos += 2;
+    if (!need((size_t)commit_len + 8))
+        return SLUA_ERR_RESTORE;
+    const std::string commit((const char*)data + pos, commit_len);
+    pos += commit_len;
+    uint64_t hash;
+    std::memcpy(&hash, data + pos, 8);
+    pos += 8;
+
+    if (commit != SLUA_RUNTIME_COMMIT)
+    {
+        logWarn("shim", "saved state is from runtime %s, this build is %s: starting the script fresh", commit.c_str(), SLUA_RUNTIME_COMMIT);
+        return s->script->loadDefaultState() ? SLUA_RESTORED_FRESH : SLUA_ERR_LOAD;
+    }
+    if (hash != s->vm->fnHash)
+    {
+        logWarn("shim", "saved state was made with a different set of bound host functions: starting the script fresh");
+        return s->script->loadDefaultState() ? SLUA_RESTORED_FRESH : SLUA_ERR_LOAD;
+    }
+    if (!s->script->restoreState((const char*)data + pos, len - pos))
+    {
+        logWarn("shim", "saved state could not be restored: starting the script fresh");
+        if (s->script->hasInstance())
+            s->script->reset();
+        return s->script->loadDefaultState() ? SLUA_RESTORED_FRESH : SLUA_ERR_LOAD;
+    }
+    return SLUA_OK;
+    SLUA_CATCH
+}
+
+SLUA_API int32_t slua_fault(slua_script* s, int32_t* kind, char* buf, int32_t cap)
+{
+    SLUA_TRY
+    if (s == nullptr || kind == nullptr || buf == nullptr || cap <= 0)
+        return SLUA_ERR_BAD_ARG;
+    VmGuard guard(s->vm);
+    if (!guard.ok())
+        return SLUA_ERR_BUSY;
+    *kind = (int32_t)s->script->getFaultKind();
+    const std::string& text = s->script->getExtendedFaultString().empty() ? s->script->getFaultString() : s->script->getExtendedFaultString();
+    std::snprintf(buf, (size_t)cap, "%s", text.c_str());
+    return SLUA_OK;
+    SLUA_CATCH
+}
+
+SLUA_API int32_t slua_used_memory(slua_script* s)
+{
+    SLUA_TRY
+    if (s == nullptr)
+        return SLUA_ERR_BAD_ARG;
+    VmGuard guard(s->vm);
+    if (!guard.ok())
+        return SLUA_ERR_BUSY;
+    return s->script->getUsedMemory();
+    SLUA_CATCH
+}
+
+SLUA_API int32_t slua_get_memory_limit(slua_script* s)
+{
+    SLUA_TRY
+    if (s == nullptr)
+        return SLUA_ERR_BAD_ARG;
+    return s->script->getMemoryLimit();
+    SLUA_CATCH
+}
+
+SLUA_API int32_t slua_set_memory_limit(slua_script* s, int32_t limit)
+{
+    SLUA_TRY
+    if (s == nullptr)
+        return SLUA_ERR_BAD_ARG;
+    VmGuard guard(s->vm);
+    if (!guard.ok())
+        return SLUA_ERR_BUSY;
+    return s->script->setMemoryLimit(limit) ? SLUA_OK : SLUA_ERR_BAD_ARG;
+    SLUA_CATCH
+}
+
+SLUA_API int32_t slua_busy_violations(void)
+{
+    return gBusyViolations.load();
+}
