@@ -234,4 +234,156 @@ public class ApiV2Tests
         Assert.Equal("OwnerSay str:dumped", lines[6]);
         Assert.StartsWith("OwnerSay str:<0.0", lines[7]);
     }
+
+    // ---- Event arguments ----
+
+    const string SLuaHandlers = """
+        LLEvents:on("link_message", function(...) ossl.Report("link_message", ...) end)
+        LLEvents:on("touch_start", function(n) ossl.Report("touch_start", n) end)
+        """;
+
+    [Fact]
+    public void B2_SLuaEventHandlerReceivesEveryArgumentType()
+    {
+        var (vm, kit) = NewVm();
+        using var _v = vm;
+        using var s = Run(vm, SLuaHandlers);
+        Assert.Equal(StepStatus.Ok, s.RunToIdle().Status);
+        var r = s.Dispatch("link_message", new[]
+        {
+            Value.Int(-3), Value.Num(1.5), Value.Str("héllo"), Value.Key(KeyA), Value.Vec(1, 2, 3), Value.Rot(1, 2, 3, 4),
+            Value.List(Value.Int(1), Value.Str("x")),
+        });
+        Assert.Equal(StepStatus.Ok, r.Status);
+        Assert.Equal(new[] { $"str:link_message num:-3 num:1.5 str:héllo key:{KeyA} vec:<1,2,3> rot:<1,2,3,4> list:[num:1,str:x]" }, kit.Snapshot());
+    }
+
+    [Fact]
+    public void B2_TwoDispatchesInARow()
+    {
+        var (vm, kit) = NewVm();
+        using var _v = vm;
+        using var s = Run(vm, SLuaHandlers);
+        s.RunToIdle();
+        Assert.Equal(StepStatus.Ok, s.Dispatch("touch_start", new[] { Value.Int(1) }).Status);
+        Assert.Equal(StepStatus.Ok, s.Dispatch("touch_start", new[] { Value.Int(2) }).Status);
+        Assert.Equal(new[] { "str:touch_start num:1", "str:touch_start num:2" }, kit.Snapshot());
+    }
+
+    [Fact]
+    public void B2_EventTheScriptDoesNotHandleIsNotRun()
+    {
+        var (vm, kit) = NewVm();
+        using var _v = vm;
+        using var s = Run(vm, SLuaHandlers);
+        s.RunToIdle();
+        Assert.Equal(StepStatus.NotRun, s.Dispatch("timer", ReadOnlySpan<Value>.Empty).Status);
+        Assert.Empty(kit.Snapshot());
+    }
+
+    [Fact]
+    public void B2_UnknownEventNameIsAnError()
+    {
+        Host.Init();
+        Assert.Throws<SluaException>(() => Host.EventIndex("no_such_event"));
+        Assert.True(Host.EventIndex("touch_start") > 0);
+    }
+
+    [Fact]
+    public void B2_DispatchWhileAHandlerIsInFlightIsRefusedThenWorksAfterItFinishes()
+    {
+        var (vm, kit) = NewVm();
+        using var _v = vm;
+        using var s = Run(vm, """
+            LLEvents:on("touch_start", function(n)
+                coroutine.yield()
+                ossl.Report("touch done", n)
+            end)
+            LLEvents:on("timer", function() ossl.Report("timer") end)
+            """);
+        s.RunToIdle();
+        Assert.Equal(StepStatus.Preempted, s.Dispatch("touch_start", new[] { Value.Int(4) }).Status);
+        var e = Assert.Throws<SluaException>(() => s.Dispatch("timer", ReadOnlySpan<Value>.Empty));
+        Assert.Equal(-8, e.Code);
+        Assert.Equal(StepStatus.Ok, s.Step().Status);
+        Assert.Equal(StepStatus.Ok, s.Dispatch("timer", ReadOnlySpan<Value>.Empty).Status);
+        Assert.Equal(new[] { "str:touch done num:4", "str:timer" }, kit.Snapshot());
+    }
+
+    [Fact]
+    public void B2_ALongHandlerIsSteppedToTheEnd()
+    {
+        var (vm, kit) = NewVm();
+        using var _v = vm;
+        using var s = Run(vm, """
+            LLEvents:on("touch_start", function(n)
+                local sum = 0
+                for i = 1, 3000000 do sum += i end
+                ossl.Report("sum", sum)
+            end)
+            """);
+        s.RunToIdle();
+        var r = s.Dispatch("touch_start", new[] { Value.Int(1) }, 0.0002);
+        Assert.Equal(StepStatus.Preempted, r.Status);
+        Assert.Equal(StepStatus.Ok, s.RunToIdle(0.05).Status);
+        Assert.Equal(new[] { "str:sum num:4500001500000" }, kit.Snapshot());
+    }
+
+    const string LslEvents = """
+        default {
+            state_entry() { llOwnerSay("entry"); }
+            link_message(integer sender, integer num, string str, key id) { llOwnerSay("lm " + (string)sender + " " + (string)num + " " + str + " " + (string)id); }
+            at_target(integer tnum, vector targetpos, vector ourpos) { llSay(tnum, (string)targetpos); }
+            at_rot_target(integer tnum, rotation targetrot, rotation ourrot) { llSay(tnum, (string)targetrot); }
+            path_update(integer type, list reserved) { llOwnerSay(llDumpList2String(reserved, ",")); }
+            dataserver(key query, string data) { state second; }
+        }
+        state second {
+            state_entry() { llOwnerSay("second"); }
+            touch_start(integer n) { llOwnerSay("touched " + (string)n); }
+        }
+        """;
+
+    [Fact]
+    public void B2_LslEventHandlersReceiveTheirArguments()
+    {
+        var (vm, kit) = NewVm();
+        using var _v = vm;
+        RegisterValueFns(vm, kit);
+        using var s = Run(vm, LslEvents, lsl: true);
+        Assert.Equal(StepStatus.Ok, s.RunToIdle().Status);
+        Assert.Equal(new[] { "OwnerSay str:entry" }, kit.Snapshot());
+
+        Assert.Equal(StepStatus.Ok, s.Dispatch("link_message", new[] { Value.Int(1), Value.Int(2), Value.Str("hi"), Value.Key(KeyA) }).Status);
+        Assert.Equal(StepStatus.Ok, s.Dispatch("at_target", new[] { Value.Int(9), Value.Vec(1, 2, 3), Value.Vec(4, 5, 6) }).Status);
+        Assert.Equal(StepStatus.Ok, s.Dispatch("at_rot_target", new[] { Value.Int(8), Value.Rot(0, 0, 0, 1), Value.Rot(0, 0, 0, 1) }).Status);
+        Assert.Equal(StepStatus.Ok, s.Dispatch("path_update", new[] { Value.Int(3), Value.List(Value.Int(5), Value.Str("a")) }).Status);
+        var lines = kit.Snapshot();
+        Assert.Equal($"OwnerSay str:lm 1 2 hi {KeyA}", lines[1]);
+        Assert.Equal("Say int:9 str:<1.00000, 2.00000, 3.00000>", lines[2]);
+        Assert.Equal("Say int:8 str:<0.00000, 0.00000, 0.00000, 1.00000>", lines[3]);
+        Assert.Equal("DumpList2String list:[int:5,str:a] str:,", lines[4]);
+    }
+
+    [Fact]
+    public void B2_LslEventThatChangesStateReportsItAndTheNextDispatchWaitsForTheStep()
+    {
+        var (vm, kit) = NewVm();
+        using var _v = vm;
+        RegisterValueFns(vm, kit);
+        using var s = Run(vm, LslEvents, lsl: true);
+        s.RunToIdle();
+        var r = s.Dispatch("dataserver", new[] { Value.Key(KeyA), Value.Str("d") });
+        Assert.Equal(StepStatus.StateChange, r.Status);
+        Assert.Equal(1, r.NewState);
+        var e = Assert.Throws<SluaException>(() => s.Dispatch("touch_start", new[] { Value.Int(1) }));
+        Assert.Equal(-8, e.Code);
+        s.RunToIdle();
+        Assert.Equal(StepStatus.Ok, s.Dispatch("touch_start", new[] { Value.Int(2) }).Status);
+        // The first state no longer handles link_message.
+        Assert.Equal(StepStatus.NotRun, s.Dispatch("link_message", new[] { Value.Int(1), Value.Int(2), Value.Str("x"), Value.Key(KeyA) }).Status);
+        var lines = kit.Snapshot();
+        Assert.Equal("OwnerSay str:second", lines[1]);
+        Assert.Equal("OwnerSay str:touched 2", lines[2]);
+    }
 }
