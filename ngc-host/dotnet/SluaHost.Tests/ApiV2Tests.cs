@@ -386,4 +386,115 @@ public class ApiV2Tests
         Assert.Equal("OwnerSay str:second", lines[1]);
         Assert.Equal("OwnerSay str:touched 2", lines[2]);
     }
+
+    // ---- One image, many scripts ----
+
+    const string Counter = """
+        local n = 0
+        while true do
+            n += 1
+            ossl.Report(ossl.Tag(), n)
+            coroutine.yield()
+        end
+        """;
+
+    [Fact]
+    public void B1_ManyScriptsFromOneImageKeepTheirOwnState()
+    {
+        var (vm, kit) = NewVm();
+        using var _v = vm;
+        vm.Register("ossl", "Tag", (tag, _) => new[] { Value.Int(tag) });
+        using var image = vm.NewImage(Host.Compile(Counter, false));
+        using var a = image.NewScript(tag: 10);
+        using var b = image.NewScript(tag: 20);
+        using var c = image.NewScript(tag: 30);
+        a.Start(); b.Start(); c.Start();
+        a.Step(); a.Step(); b.Step(); c.Step(); a.Step();
+        Assert.Equal(new[] { "num:10 num:1", "num:10 num:2", "num:20 num:1", "num:30 num:1", "num:10 num:3" }, kit.Snapshot());
+    }
+
+    [Fact]
+    public void B1_ScriptsKeepWorkingAfterTheImageHandleIsDisposed()
+    {
+        var (vm, kit) = NewVm();
+        using var _v = vm;
+        Script a, b;
+        using (var image = vm.NewImage(Host.Compile("ossl.Report('ran')", false)))
+        {
+            a = image.NewScript(tag: 1);
+            b = image.NewScript(tag: 2);
+        }
+        a.Start(); b.Start();
+        Assert.Equal(StepStatus.Ok, a.RunToIdle().Status);
+        Assert.Equal(StepStatus.Ok, b.RunToIdle().Status);
+        Assert.Equal(2, kit.Snapshot().Length);
+        a.Dispose(); b.Dispose();
+    }
+
+    [Fact]
+    public unsafe void B1_AVmWithALiveImageOrScriptCannotBeFreed()
+    {
+        var (vm, _) = NewVm();
+        var image = vm.NewImage(Host.Compile("ossl.Nop()", false));
+        Assert.Equal(-8, Native.slua_vm_free(vm.Handle));
+        var s = image.NewScript();
+        image.Dispose();
+        Assert.Equal(-8, Native.slua_vm_free(vm.Handle));
+        s.Dispose();
+        vm.Dispose();
+    }
+
+    [Fact]
+    public void B1_LslScriptsShareAnImageToo()
+    {
+        var (vm, kit) = NewVm();
+        using var _v = vm;
+        using var image = vm.NewImage(Host.Compile("integer n;\ndefault { state_entry() { n += 1; llOwnerSay((string)n); } }", true));
+        using var a = image.NewScript(tag: 1);
+        using var b = image.NewScript(tag: 2);
+        a.Start(); b.Start();
+        a.RunToIdle(); b.RunToIdle();
+        Assert.Equal(new[] { "OwnerSay str:1", "OwnerSay str:1" }, kit.Snapshot());
+        Assert.Equal(128 * 1024, a.MemoryLimit);
+    }
+
+    [Fact]
+    public void B1_SharedImageCostsLessMemoryPerScriptThanAPrivateOne()
+    {
+        var kit = new TestKit();
+        byte[] asset = Host.Compile(
+            "local t = { 1, 2, 3 }\nlocal function f() return t end\nossl.Nop()\nfunction ondone() end\n" +
+            string.Concat(Enumerable.Range(0, 40).Select(i => $"local function g{i}(a, b) return a * {i + 1} + b - {i} end\nossl.Nop(g{i}(1, 2))\n")) +
+            "coroutine.yield()", false);
+        const int n = 300;
+
+        long Measure1(bool shared, out long counted)
+        {
+            using var vm = new Vm(Watchdog.Resident);
+            kit.Register(vm);
+            using var image = shared ? vm.NewImage(asset) : null;
+            GC.Collect(); GC.WaitForPendingFinalizers();
+            long before = Measure.RssBytes();
+            var scripts = new List<Script>();
+            counted = 0;
+            for (int i = 0; i < n; i++)
+            {
+                var s = shared ? image!.NewScript(tag: i) : vm.NewScript(asset, tag: i);
+                s.Start();
+                s.Step();
+                counted += s.UsedMemory;
+                scripts.Add(s);
+            }
+            long after = Measure.RssBytes();
+            foreach (var s in scripts) s.Dispose();
+            counted /= n;
+            return (after - before) / n;
+        }
+
+        Measure1(false, out _); // warm up allocator
+        long privatePer = Measure1(false, out long privateCounted);
+        long sharedPer = Measure1(true, out long sharedCounted);
+        Measure.Record("b1-memory-per-script", $"private image {privatePer} bytes RSS per script, shared image {sharedPer} bytes (n={n}); counted against the limit: private {privateCounted}, shared {sharedCounted}");
+        Assert.True(sharedPer < privatePer, $"shared {sharedPer} B per script is not below private {privatePer} B");
+    }
 }
