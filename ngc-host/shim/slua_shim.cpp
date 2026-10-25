@@ -41,6 +41,12 @@ namespace
 {
 
 constexpr int kMaxHostArgs = 32;
+
+// The engine that runs LSL scripts calling os*, iw* and bot* functions, as named
+// in the compile refusal. The header token that selects it is a placeholder
+// until it is decided; this is the only place either is written.
+constexpr const char* kOsFunctionEngineName = "Phlox";
+constexpr const char* kOsFunctionEngineHeader = "//engine:PLACEHOLDER";
 constexpr int kMaxHostRets = 8;
 
 std::atomic<int32_t> gBusyViolations{0};
@@ -297,6 +303,47 @@ void put32(std::string& s, uint32_t v) { s.append((const char*)&v, 4); }
 void put16(std::string& s, uint16_t v) { s.append((const char*)&v, 2); }
 void put64(std::string& s, uint64_t v) { s.append((const char*)&v, 8); }
 
+// Names of undeclared os*, iw* and bot* functions in a compiler message such as
+// "`osGetGridName' is undeclared.", in order of first appearance. A function the
+// script declares itself under such a name is not undeclared and does not match.
+void collectUndeclaredHostFunctions(const std::string& text, std::vector<std::string>& names)
+{
+    static const char kTail[] = "' is undeclared";
+    size_t pos = 0;
+    while ((pos = text.find('`', pos)) != std::string::npos)
+    {
+        ++pos;
+        const size_t end = text.find('\'', pos);
+        if (end == std::string::npos)
+            break;
+        if (text.compare(end, sizeof(kTail) - 1, kTail) != 0)
+            continue;
+        const std::string name = text.substr(pos, end - pos);
+        size_t prefix = 0;
+        if (name.compare(0, 2, "os") == 0 || name.compare(0, 2, "iw") == 0)
+            prefix = 2;
+        else if (name.compare(0, 3, "bot") == 0)
+            prefix = 3;
+        if (prefix == 0 || name.size() <= prefix || !(name[prefix] >= 'A' && name[prefix] <= 'Z'))
+            continue;
+        if (std::find(names.begin(), names.end(), name) == names.end())
+            names.push_back(name);
+    }
+}
+
+std::string unsupportedFunctionMessage(const std::vector<std::string>& names)
+{
+    std::string msg;
+    for (const std::string& n : names)
+        msg += (msg.empty() ? "" : ", ") + n;
+    msg += ": not available in this script engine. LSL scripts that call os*, iw* or bot* functions run on the ";
+    msg += kOsFunctionEngineName;
+    msg += " engine (script header ";
+    msg += kOsFunctionEngineHeader;
+    msg += ").";
+    return msg;
+}
+
 char* dupString(const std::string& s)
 {
     char* p = (char*)std::malloc(s.size() + 1);
@@ -401,8 +448,18 @@ SLUA_API int32_t slua_compile(const char* src, size_t len, int32_t is_lsl, uint8
     catch (Luau::ParseErrors& e)
     {
         std::string msg;
+        std::vector<std::string> osNames;
         for (const Luau::ParseError& pe : e.getErrors())
+        {
             msg += std::to_string(pe.getLocation().begin.line + 1) + ": " + pe.what() + "\n";
+            if (is_lsl)
+                collectUndeclaredHostFunctions(pe.what(), osNames);
+        }
+        if (!osNames.empty())
+        {
+            *err = dupString(unsupportedFunctionMessage(osNames));
+            return SLUA_ERR_UNSUPPORTED_FUNCTION;
+        }
         *err = dupString(msg);
         return SLUA_ERR_COMPILE;
     }
