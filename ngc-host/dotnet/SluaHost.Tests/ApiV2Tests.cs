@@ -240,7 +240,7 @@ public class ApiV2Tests
 
     const string SLuaHandlers = """
         LLEvents:on("link_message", function(...) ossl.Report("link_message", ...) end)
-        LLEvents:on("touch_start", function(n) ossl.Report("touch_start", n) end)
+        LLEvents:on("dataserver", function(query, data) ossl.Report("dataserver", data) end)
         """;
 
     [Fact]
@@ -266,9 +266,9 @@ public class ApiV2Tests
         using var _v = vm;
         using var s = Run(vm, SLuaHandlers);
         s.RunToIdle();
-        Assert.Equal(StepStatus.Ok, s.Dispatch("touch_start", new[] { Value.Int(1) }).Status);
-        Assert.Equal(StepStatus.Ok, s.Dispatch("touch_start", new[] { Value.Int(2) }).Status);
-        Assert.Equal(new[] { "str:touch_start num:1", "str:touch_start num:2" }, kit.Snapshot());
+        Assert.Equal(StepStatus.Ok, s.Dispatch("dataserver", new[] { Value.Key(KeyA), Value.Str("one") }).Status);
+        Assert.Equal(StepStatus.Ok, s.Dispatch("dataserver", new[] { Value.Key(KeyA), Value.Str("two") }).Status);
+        Assert.Equal(new[] { "str:dataserver str:one", "str:dataserver str:two" }, kit.Snapshot());
     }
 
     [Fact]
@@ -296,19 +296,19 @@ public class ApiV2Tests
         var (vm, kit) = NewVm();
         using var _v = vm;
         using var s = Run(vm, """
-            LLEvents:on("touch_start", function(n)
+            LLEvents:on("dataserver", function(query, data)
                 coroutine.yield()
-                ossl.Report("touch done", n)
+                ossl.Report("dataserver done", data)
             end)
             LLEvents:on("timer", function() ossl.Report("timer") end)
             """);
         s.RunToIdle();
-        Assert.Equal(StepStatus.Preempted, s.Dispatch("touch_start", new[] { Value.Int(4) }).Status);
+        Assert.Equal(StepStatus.Preempted, s.Dispatch("dataserver", new[] { Value.Key(KeyA), Value.Str("four") }).Status);
         var e = Assert.Throws<SluaException>(() => s.Dispatch("timer", ReadOnlySpan<Value>.Empty));
         Assert.Equal(-8, e.Code);
         Assert.Equal(StepStatus.Ok, s.Step().Status);
         Assert.Equal(StepStatus.Ok, s.Dispatch("timer", ReadOnlySpan<Value>.Empty).Status);
-        Assert.Equal(new[] { "str:touch done num:4", "str:timer" }, kit.Snapshot());
+        Assert.Equal(new[] { "str:dataserver done str:four", "str:timer" }, kit.Snapshot());
     }
 
     [Fact]
@@ -317,14 +317,14 @@ public class ApiV2Tests
         var (vm, kit) = NewVm();
         using var _v = vm;
         using var s = Run(vm, """
-            LLEvents:on("touch_start", function(n)
+            LLEvents:on("dataserver", function(query, data)
                 local sum = 0
                 for i = 1, 3000000 do sum += i end
                 ossl.Report("sum", sum)
             end)
             """);
         s.RunToIdle();
-        var r = s.Dispatch("touch_start", new[] { Value.Int(1) }, 0.0002);
+        var r = s.Dispatch("dataserver", new[] { Value.Key(KeyA), Value.Str("x") }, 0.0002);
         Assert.Equal(StepStatus.Preempted, r.Status);
         Assert.Equal(StepStatus.Ok, s.RunToIdle(0.05).Status);
         Assert.Equal(new[] { "str:sum num:4500001500000" }, kit.Snapshot());
