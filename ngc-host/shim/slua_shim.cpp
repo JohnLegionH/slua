@@ -65,6 +65,23 @@ double clockProvider(lua_State*)
     return lua_clock();
 }
 
+// Keeps an SLua script's handler register current: LLEvents:on and :off call
+// this, and the host is the one that stores the result. A name that is not an
+// LSL event is refused, which the script sees as an error from :on.
+bool handlerRegistration(lua_State* L, const char* event_name, bool registered)
+{
+    const int index = Luau::lslEventIndex(event_name);
+    if (index <= 0)
+        return false;
+    Script* script = Script::fromLuaState(L);
+    if (script == nullptr)
+        return false;
+    const uint64_t bit = Luau::lslEventBit(index);
+    const uint64_t handlers = script->getEventHandlers();
+    script->setEventHandlers(registered ? (handlers | bit) : (handlers & ~bit));
+    return true;
+}
+
 struct HostFnRec
 {
     std::string table;
@@ -579,6 +596,7 @@ SLUA_API int32_t slua_vm_new(int32_t watchdog_mode, slua_vm** out)
     HostCallbacks callbacks;
     callbacks.clockProvider = clockProvider;
     callbacks.populateEnvironment = populateEnvironment;
+    callbacks.eventHandlerRegistrationCb = handlerRegistration;
     switch (watchdog_mode)
     {
     case SLUA_WATCHDOG_RESIDENT:
@@ -790,6 +808,92 @@ SLUA_API int32_t slua_step(slua_script* s, double quanta_seconds, slua_step_resu
     SLUA_CATCH
 }
 
+SLUA_API int32_t slua_event_index(const char* name)
+{
+    SLUA_TRY
+    if (name == nullptr)
+        return SLUA_ERR_BAD_ARG;
+    const int index = Luau::lslEventIndex(name);
+    return index > 0 ? index : SLUA_ERR_BAD_ARG;
+    SLUA_CATCH
+}
+
+namespace
+{
+
+struct EventArgs
+{
+    const slua_value* args;
+    int32_t count;
+};
+
+// Runs inside callEventHandler, after the handler and the event name are on the
+// handler thread's stack. A lua_exception here (memory, bad value) is caught by
+// callEventHandler and becomes a fault.
+void pushEventArgs(lua_State* L, void* ctx)
+{
+    const EventArgs* ea = static_cast<const EventArgs*>(ctx);
+    luaL_checkstack(L, ea->count + 4, "event arguments");
+    for (int32_t i = 0; i < ea->count; ++i)
+        pushValue(L, ea->args[i], true);
+}
+
+} // namespace
+
+SLUA_API int32_t slua_dispatch_event(slua_script* s, int32_t event, const slua_value* args, int32_t nargs, double quanta_seconds, slua_step_result* result)
+{
+    SLUA_TRY
+    if (s == nullptr || result == nullptr || quanta_seconds <= 0.0 || nargs < 0 || nargs > kMaxHostArgs || (nargs > 0 && args == nullptr))
+        return SLUA_ERR_BAD_ARG;
+    if (event <= 0 || Luau::lslEventName(event) == nullptr)
+        return SLUA_ERR_BAD_ARG;
+    VmGuard guard(s->vm);
+    if (!guard.ok())
+        return SLUA_ERR_BUSY;
+    Script& script = *s->script;
+    std::memset(result, 0, sizeof(*result));
+
+    if (script.getFaultKind() != FaultKind::None)
+    {
+        result->status = SLUA_STEP_FAULT;
+        result->fault_kind = (int32_t)script.getFaultKind();
+        return SLUA_OK;
+    }
+    if (!script.hasInstance())
+        return SLUA_ERR_STATE;
+    // One handler at a time, and a pending state change runs its state_exit and
+    // state_entry first (keep calling slua_step until it reports IDLE).
+    const uint64_t stateBits = Luau::LSLEventBit::StateExit | Luau::LSLEventBit::StateEntry;
+    if (script.isHandlerActive() || script.isStateChangePending() || (script.getCurrentEvents() & stateBits))
+        return SLUA_ERR_STATE;
+
+    // Same sleep handling as slua_step.
+    if (script.getSleep() > 0.0f)
+    {
+        result->sleep_served = script.getSleep();
+        script.setSleep(0.0f);
+    }
+
+    // A script that is known not to handle the event is not run at all.
+    if (script.eventHandlersKnown() && !(script.getEventHandlers() & Luau::lslEventBit(event)))
+    {
+        result->status = SLUA_STEP_NOT_RUN;
+        return SLUA_OK;
+    }
+
+    EventArgs ea{args, nargs};
+    RunResult rr;
+    {
+        RunWindow window(script, quanta_seconds);
+        rr = script.callEventHandler(event, pushEventArgs, &ea);
+    }
+    result->status = (int32_t)rr.status;
+    result->new_state = rr.newState;
+    result->fault_kind = (int32_t)script.getFaultKind();
+    return SLUA_OK;
+    SLUA_CATCH
+}
+
 SLUA_API int32_t slua_kill(slua_script* s)
 {
     SLUA_TRY
@@ -962,5 +1066,3 @@ SLUA_API int32_t slua_busy_violations(void)
 SLUA_API int32_t slua_image_new(slua_vm*, const uint8_t*, size_t, slua_image**) { return SLUA_ERR_NOT_IMPLEMENTED; }
 SLUA_API int32_t slua_image_free(slua_image*) { return SLUA_ERR_NOT_IMPLEMENTED; }
 SLUA_API int32_t slua_script_new_from_image(slua_image*, int32_t, int64_t, slua_script**) { return SLUA_ERR_NOT_IMPLEMENTED; }
-SLUA_API int32_t slua_event_index(const char*) { return SLUA_ERR_NOT_IMPLEMENTED; }
-SLUA_API int32_t slua_dispatch_event(slua_script*, int32_t, const slua_value*, int32_t, double, slua_step_result*) { return SLUA_ERR_NOT_IMPLEMENTED; }
