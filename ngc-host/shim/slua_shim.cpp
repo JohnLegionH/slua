@@ -40,7 +40,6 @@ using namespace Luau::Executor;
 namespace
 {
 
-constexpr int32_t kAbiVersion = 1;
 constexpr int kMaxHostArgs = 32;
 constexpr int kMaxHostRets = 8;
 
@@ -323,9 +322,27 @@ SLUA_API int32_t slua_version(char* buf, int32_t cap)
     SLUA_TRY
     if (buf == nullptr || cap <= 0)
         return SLUA_ERR_BAD_ARG;
-    std::snprintf(buf, (size_t)cap, "runtime=%s abi=%d", SLUA_RUNTIME_COMMIT, (int)kAbiVersion);
+    std::snprintf(buf, (size_t)cap, "runtime=%s api=%d", SLUA_RUNTIME_COMMIT, (int)SLUA_API_VERSION);
     return SLUA_OK;
     SLUA_CATCH
+}
+
+SLUA_API int32_t slua_api_version(void)
+{
+    return SLUA_API_VERSION;
+}
+
+SLUA_API int32_t slua_struct_size(int32_t which)
+{
+    switch (which)
+    {
+    case SLUA_STRUCT_VALUE:
+        return (int32_t)sizeof(slua_value);
+    case SLUA_STRUCT_STEP_RESULT:
+        return (int32_t)sizeof(slua_step_result);
+    default:
+        return SLUA_ERR_BAD_ARG;
+    }
 }
 
 SLUA_API int32_t slua_set_log(slua_log_fn fn)
@@ -793,8 +810,6 @@ SLUA_API int32_t slua_busy_violations(void)
 
 // ---- Stubs for the exports added in API version 2. Replaced one by one. ----
 
-SLUA_API int32_t slua_api_version(void) { return SLUA_ERR_NOT_IMPLEMENTED; }
-SLUA_API int32_t slua_struct_size(int32_t) { return SLUA_ERR_NOT_IMPLEMENTED; }
 SLUA_API int32_t slua_image_new(slua_vm*, const uint8_t*, size_t, slua_image**) { return SLUA_ERR_NOT_IMPLEMENTED; }
 SLUA_API int32_t slua_image_free(slua_image*) { return SLUA_ERR_NOT_IMPLEMENTED; }
 SLUA_API int32_t slua_script_new_from_image(slua_image*, int32_t, int64_t, slua_script**) { return SLUA_ERR_NOT_IMPLEMENTED; }
