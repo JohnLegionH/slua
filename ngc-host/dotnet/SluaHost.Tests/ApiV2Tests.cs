@@ -388,6 +388,24 @@ public class ApiV2Tests
         Assert.Equal("OwnerSay str:touched 2", lines[2]);
     }
 
+    [Fact]
+    public void B2_SLuaTimerRequestsAreReportedToTheHost()
+    {
+        var (vm, kit) = NewVm();
+        using var _v = vm;
+        using var s = Run(vm, """
+            local timer = LLTimers:every(0.5, function() ossl.Report("tick") end)
+            LLEvents:on("dataserver", function(query, data) LLTimers:off(timer) end)
+            """);
+        Assert.Equal(0.0, s.TimerInterval);
+        Assert.Equal(StepStatus.Ok, s.RunToIdle().Status);
+        Assert.InRange(s.TimerInterval, 0.49, 0.51);
+        // Removing the last timer tells the host to stop the timer event.
+        Assert.Equal(StepStatus.Ok, s.Dispatch("dataserver", new[] { Value.Key(KeyA), Value.Str("x") }).Status);
+        Assert.Equal(0.0, s.TimerInterval);
+        Assert.Empty(kit.Snapshot());
+    }
+
     // ---- One image, many scripts ----
 
     const string Counter = """

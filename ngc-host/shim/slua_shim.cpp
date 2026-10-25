@@ -967,6 +967,8 @@ SLUA_API int32_t slua_dispatch_event(slua_script* s, int32_t event, const slua_v
     SLUA_CATCH
 }
 
+SLUA_API int32_t slua_timer_interval(slua_script*, double*) { return SLUA_ERR_NOT_IMPLEMENTED; }
+
 SLUA_API int32_t slua_kill(slua_script* s)
 {
     SLUA_TRY

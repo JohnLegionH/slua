@@ -169,6 +169,9 @@ SLUA_API int32_t slua_event_index(const char* name);
 // result->status is NOT_RUN when the script has no handler for the event.
 // Later steps of the same handler go through slua_step.
 SLUA_API int32_t slua_dispatch_event(slua_script* s, int32_t event, const slua_value* args, int32_t nargs, double quanta_seconds, slua_step_result* result);
+// The interval an SLua script last asked for with LLTimers, in seconds; 0 when it has no timer.
+// The host schedules a "timer" event dispatch for that time. Not meaningful for LSL.
+SLUA_API int32_t slua_timer_interval(slua_script* s, double* seconds);
 SLUA_API int32_t slua_kill(slua_script* s);
 
 SLUA_API int32_t slua_serialize(slua_script* s, uint8_t** out, size_t* out_len);

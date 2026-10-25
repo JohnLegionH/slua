@@ -316,6 +316,17 @@ public sealed unsafe class Script : IDisposable
     public StepResult Dispatch(string eventName, ReadOnlySpan<Value> args, double quantaSeconds = 0.01) =>
         Dispatch(Host.EventIndex(eventName), args, quantaSeconds);
 
+    /// <summary>The interval in seconds the script last asked for with LLTimers; 0 when it has no timer.</summary>
+    public double TimerInterval
+    {
+        get
+        {
+            double seconds;
+            Host.Check("slua_timer_interval", Native.slua_timer_interval(_h, &seconds));
+            return seconds;
+        }
+    }
+
     public void Kill() => Host.Check("slua_kill", Native.slua_kill(_h));
 
     public byte[] Serialize()
