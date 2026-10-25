@@ -106,7 +106,14 @@ struct slua_vm : public Provisioner<Script>
     // One thread at a time. Set while any export is working on this VM or its scripts.
     std::atomic<int> busy{0};
     int liveScripts = 0;
+    int liveImages = 0;
     uint64_t fnHash = 0;
+};
+
+struct slua_image
+{
+    slua_vm* vm = nullptr;
+    std::shared_ptr<IImage> image;
 };
 
 struct slua_script
@@ -624,7 +631,7 @@ SLUA_API int32_t slua_vm_free(slua_vm* vm)
             return SLUA_ERR_BUSY;
         // Scripts hold their image, and through it the environment, so freeing
         // the VM under live scripts would leave them pointing at nothing.
-        if (vm->liveScripts != 0)
+        if (vm->liveScripts != 0 || vm->liveImages != 0)
             return SLUA_ERR_STATE;
         vm->environments.clear();
     }
@@ -662,15 +669,12 @@ SLUA_API int32_t slua_watchdog_stats(slua_vm* vm, uint64_t* fires, uint64_t* lat
     SLUA_CATCH
 }
 
-SLUA_API int32_t slua_script_new(slua_vm* vm, const uint8_t* asset, size_t len, int32_t memory_limit, int64_t tag, slua_script** out)
+SLUA_API int32_t slua_image_new(slua_vm* vm, const uint8_t* asset, size_t len, slua_image** out)
 {
     SLUA_TRY
     if (vm == nullptr || asset == nullptr || out == nullptr)
         return SLUA_ERR_BAD_ARG;
     *out = nullptr;
-    // A host may lower a script's limit, never raise it past the ceiling.
-    if (memory_limit > SLUA_MEMORY_LIMIT_MAX)
-        return SLUA_ERR_LIMIT;
     VmGuard guard(vm);
     if (!guard.ok())
         return SLUA_ERR_BUSY;
@@ -693,6 +697,42 @@ SLUA_API int32_t slua_script_new(slua_vm* vm, const uint8_t* asset, size_t len, 
     if (image == nullptr || !image->isValid())
         return SLUA_ERR_LOAD;
 
+    auto holder = std::make_unique<slua_image>();
+    holder->vm = vm;
+    holder->image = image;
+    vm->liveImages++;
+    *out = holder.release();
+    return SLUA_OK;
+    SLUA_CATCH
+}
+
+SLUA_API int32_t slua_image_free(slua_image* img)
+{
+    SLUA_TRY
+    if (img == nullptr)
+        return SLUA_ERR_BAD_ARG;
+    {
+        VmGuard guard(img->vm);
+        if (!guard.ok())
+            return SLUA_ERR_BUSY;
+        // Scripts made from the image hold their own reference to it.
+        img->image.reset();
+        img->vm->liveImages--;
+    }
+    delete img;
+    return SLUA_OK;
+    SLUA_CATCH
+}
+
+namespace
+{
+
+// Makes a script on an image. The caller holds the VM guard.
+int32_t makeScript(slua_vm* vm, const std::shared_ptr<IImage>& image, int32_t memory_limit, int64_t tag, slua_script** out)
+{
+    // A host may lower a script's limit, never raise it past the ceiling.
+    if (memory_limit > SLUA_MEMORY_LIMIT_MAX)
+        return SLUA_ERR_LIMIT;
     auto holder = std::make_unique<slua_script>();
     holder->vm = vm;
     holder->tag = tag;
@@ -707,6 +747,39 @@ SLUA_API int32_t slua_script_new(slua_vm* vm, const uint8_t* asset, size_t len, 
     vm->liveScripts++;
     *out = holder.release();
     return SLUA_OK;
+}
+
+} // namespace
+
+SLUA_API int32_t slua_script_new_from_image(slua_image* img, int32_t memory_limit, int64_t tag, slua_script** out)
+{
+    SLUA_TRY
+    if (img == nullptr || out == nullptr)
+        return SLUA_ERR_BAD_ARG;
+    *out = nullptr;
+    VmGuard guard(img->vm);
+    if (!guard.ok())
+        return SLUA_ERR_BUSY;
+    return makeScript(img->vm, img->image, memory_limit, tag, out);
+    SLUA_CATCH
+}
+
+SLUA_API int32_t slua_script_new(slua_vm* vm, const uint8_t* asset, size_t len, int32_t memory_limit, int64_t tag, slua_script** out)
+{
+    SLUA_TRY
+    if (vm == nullptr || asset == nullptr || out == nullptr)
+        return SLUA_ERR_BAD_ARG;
+    *out = nullptr;
+    if (memory_limit > SLUA_MEMORY_LIMIT_MAX)
+        return SLUA_ERR_LIMIT;
+    // A private image: the script keeps the only reference once the handle is gone.
+    slua_image* img = nullptr;
+    int32_t rc = slua_image_new(vm, asset, len, &img);
+    if (rc != SLUA_OK)
+        return rc;
+    rc = slua_script_new_from_image(img, memory_limit, tag, out);
+    slua_image_free(img);
+    return rc;
     SLUA_CATCH
 }
 
@@ -1060,9 +1133,3 @@ SLUA_API int32_t slua_busy_violations(void)
 {
     return gBusyViolations.load();
 }
-
-// ---- Stubs for the exports added in API version 2. Replaced one by one. ----
-
-SLUA_API int32_t slua_image_new(slua_vm*, const uint8_t*, size_t, slua_image**) { return SLUA_ERR_NOT_IMPLEMENTED; }
-SLUA_API int32_t slua_image_free(slua_image*) { return SLUA_ERR_NOT_IMPLEMENTED; }
-SLUA_API int32_t slua_script_new_from_image(slua_image*, int32_t, int64_t, slua_script**) { return SLUA_ERR_NOT_IMPLEMENTED; }
