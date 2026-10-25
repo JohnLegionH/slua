@@ -508,6 +508,9 @@ SLUA_API int32_t slua_script_new(slua_vm* vm, const uint8_t* asset, size_t len, 
     if (vm == nullptr || asset == nullptr || out == nullptr)
         return SLUA_ERR_BAD_ARG;
     *out = nullptr;
+    // A host may lower a script's limit, never raise it past the ceiling.
+    if (memory_limit > SLUA_MEMORY_LIMIT_MAX)
+        return SLUA_ERR_LIMIT;
     VmGuard guard(vm);
     if (!guard.ok())
         return SLUA_ERR_BUSY;
@@ -799,7 +802,11 @@ SLUA_API int32_t slua_set_memory_limit(slua_script* s, int32_t limit)
     VmGuard guard(s->vm);
     if (!guard.ok())
         return SLUA_ERR_BUSY;
-    return s->script->setMemoryLimit(limit) ? SLUA_OK : SLUA_ERR_BAD_ARG;
+    // The Executor refuses a limit above its default or below the memory in use.
+    // setMemoryLimitUnsafe is deliberately not exposed.
+    if (limit > SLUA_MEMORY_LIMIT_MAX)
+        return SLUA_ERR_LIMIT;
+    return s->script->setMemoryLimit(limit) ? SLUA_OK : SLUA_ERR_LIMIT;
     SLUA_CATCH
 }
 
