@@ -1,0 +1,72 @@
+# Copyright (c) 2026 Legion Builds
+# Licensed under the MIT License; see LICENSE.txt in the repository root.
+#
+# Builds and tests the ngc-host native library on Windows x64 and Linux x64 for every
+# push to a branch named ngc-host/..., and uploads the library with its notices.
+# Ubuntu 22.04 is used on purpose: a library built there loads on newer distributions.
+name: ngc-host
+
+on:
+  push:
+    branches:
+      - 'ngc-host/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win-x64
+          - os: ubuntu-22.04
+            platform: linux-x64
+    env:
+      DOTNET_NOLOGO: '1'
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build the native library (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: ngc-host\scripts\build-win.cmd "%GITHUB_WORKSPACE%" "%RUNNER_TEMP%\native"
+
+      - name: Build the native library (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sh ngc-host/scripts/build-linux.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/native"
+
+      - name: Test
+        shell: bash
+        env:
+          SLUA_SHIM_PATH: ${{ runner.temp }}/native/slua
+        run: dotnet test ngc-host/dotnet/SluaHost.Tests/SluaHost.Tests.csproj -c Release
+
+      - name: Collect the library and its notices
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/package/licenses"
+          cp "$RUNNER_TEMP"/native/slua/slua_shim.dll "$RUNNER_TEMP/package/" 2>/dev/null || true
+          cp "$RUNNER_TEMP"/native/slua/libslua_shim.so "$RUNNER_TEMP/package/" 2>/dev/null || true
+          cp ngc-host/THIRD-PARTY-NOTICES.txt "$RUNNER_TEMP/package/"
+          cp ngc-host/licenses/* "$RUNNER_TEMP/package/licenses/"
+          cp ngc-host/shim/slua_shim.h "$RUNNER_TEMP/package/"
+          ls -l "$RUNNER_TEMP/package"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ngc-host-${{ matrix.platform }}
+          path: ${{ runner.temp }}/package
+          if-no-files-found: error
