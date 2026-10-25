@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -154,6 +155,158 @@ uint64_t hashFunctionList(const std::vector<HostFnRec>& fns)
     return fnvHash(all);
 }
 
+// Text and element arrays made while reading one call's arguments. Deques keep
+// the addresses of earlier entries stable as later ones are added.
+struct ReadScratch
+{
+    std::deque<std::string> texts;
+    std::deque<std::vector<slua_value>> lists;
+};
+
+// Reads the Lua value at idx into v. Strings point into the Lua string, which
+// the caller keeps on the stack or in a table for the whole call; key text and
+// list elements live in the scratch. A list may not hold a list.
+void readValue(lua_State* L, int idx, slua_value& v, ReadScratch& scratch, bool allowList)
+{
+    std::memset(&v, 0, sizeof(v));
+    switch (lua_type(L, idx))
+    {
+    case LUA_TNIL:
+        v.type = SLUA_T_NIL;
+        break;
+    case LUA_TBOOLEAN:
+        v.type = SLUA_T_BOOL;
+        v.i = lua_toboolean(L, idx) ? 1 : 0;
+        break;
+    case LUA_TNUMBER:
+        v.type = SLUA_T_NUMBER;
+        v.n = lua_tonumber(L, idx);
+        break;
+    case LUA_TINTEGER:
+    {
+        int isint = 0;
+        v.type = SLUA_T_INT;
+        v.i = lua_tointeger64(L, idx, &isint);
+        break;
+    }
+    case LUA_TSTRING:
+    {
+        size_t len = 0;
+        v.type = SLUA_T_STRING;
+        v.s = lua_tolstring(L, idx, &len);
+        v.len = (int32_t)len;
+        break;
+    }
+    case LUA_TVECTOR:
+    {
+        const float* f = lua_tovector(L, idx);
+        v.type = SLUA_T_VECTOR;
+        v.v[0] = f[0];
+        v.v[1] = f[1];
+        v.v[2] = f[2];
+        break;
+    }
+    case LUA_TUSERDATA:
+    {
+        if (lua_userdatatag(L, idx) == UTAG_QUATERNION)
+        {
+            const float* q = (const float*)lua_touserdatatagged(L, idx, UTAG_QUATERNION);
+            v.type = SLUA_T_ROTATION;
+            std::memcpy(v.v, q, sizeof(float) * 4);
+            break;
+        }
+        if (lua_userdatatag(L, idx) == UTAG_UUID)
+        {
+            // The key's text form, as the script itself would print it.
+            size_t len = 0;
+            luaL_checkstack(L, 2, "key");
+            const char* text = luaL_tolstring(L, idx, &len);
+            scratch.texts.emplace_back(text, len);
+            lua_pop(L, 1);
+            v.type = SLUA_T_KEY;
+            v.s = scratch.texts.back().c_str();
+            v.len = (int32_t)scratch.texts.back().size();
+            break;
+        }
+        luaL_errorL(L, "unsupported type %s", luaL_typename(L, idx));
+        break;
+    }
+    case LUA_TTABLE:
+    {
+        if (!allowList)
+            luaL_errorL(L, "a list cannot hold a list");
+        const int n = (int)lua_objlen(L, idx);
+        if (n > SLUA_MAX_LIST_ITEMS)
+            luaL_errorL(L, "list has too many elements (%d)", n);
+        luaL_checkstack(L, 3, "list");
+        scratch.lists.emplace_back((size_t)n);
+        std::vector<slua_value>& items = scratch.lists.back();
+        const int abs = lua_absindex(L, idx);
+        for (int k = 0; k < n; ++k)
+        {
+            lua_rawgeti(L, abs, k + 1);
+            readValue(L, lua_gettop(L), items[(size_t)k], scratch, false);
+            lua_pop(L, 1);
+        }
+        v.type = SLUA_T_LIST;
+        v.len = n;
+        v.items = items.data();
+        break;
+    }
+    default:
+        luaL_errorL(L, "unsupported type %s", luaL_typename(L, idx));
+    }
+}
+
+// Pushes a boundary value onto the Lua stack as the script's own type for it.
+void pushValue(lua_State* L, const slua_value& v, bool allowList)
+{
+    switch (v.type)
+    {
+    case SLUA_T_NIL:
+        lua_pushnil(L);
+        break;
+    case SLUA_T_BOOL:
+        lua_pushboolean(L, v.i != 0);
+        break;
+    case SLUA_T_INT:
+        luaSL_pushnativeinteger(L, (int)v.i);
+        break;
+    case SLUA_T_NUMBER:
+        lua_pushnumber(L, v.n);
+        break;
+    case SLUA_T_STRING:
+        lua_pushlstring(L, v.s ? v.s : "", (size_t)v.len);
+        break;
+    case SLUA_T_VECTOR:
+        lua_pushvector(L, v.v[0], v.v[1], v.v[2]);
+        break;
+    case SLUA_T_KEY:
+        luaSL_pushuuidlstring(L, v.s ? v.s : "", (size_t)v.len);
+        break;
+    case SLUA_T_ROTATION:
+        luaSL_pushquaternion(L, v.v[0], v.v[1], v.v[2], v.v[3]);
+        break;
+    case SLUA_T_LIST:
+    {
+        if (!allowList)
+            luaL_errorL(L, "a list cannot hold a list");
+        if (v.len < 0 || v.len > SLUA_MAX_LIST_ITEMS || (v.len > 0 && v.items == nullptr))
+            luaL_errorL(L, "list is not valid");
+        luaL_checkstack(L, 3, "list");
+        lua_createtable(L, v.len, 0);
+        for (int32_t k = 0; k < v.len; ++k)
+        {
+            pushValue(L, v.items[k], false);
+            lua_rawseti(L, -2, k + 1);
+        }
+        break;
+    }
+    default:
+        luaL_errorL(L, "unsupported value type %d", v.type);
+    }
+}
+
 // Copies the script's arguments into flat records, calls the managed host
 // function, and pushes whatever it returns. Runs on the script's thread,
 // inside lua_resume. luaL_errorL unwinds only native frames up to the
@@ -175,52 +328,9 @@ int hostTrampoline(lua_State* L)
     if (nargs > kMaxHostArgs)
         luaL_errorL(L, "too many arguments (%d)", nargs);
     slua_value args[kMaxHostArgs];
+    ReadScratch scratch;
     for (int i = 0; i < nargs; ++i)
-    {
-        slua_value& v = args[i];
-        std::memset(&v, 0, sizeof(v));
-        const int idx = i + 1;
-        switch (lua_type(L, idx))
-        {
-        case LUA_TNIL:
-            v.type = SLUA_T_NIL;
-            break;
-        case LUA_TBOOLEAN:
-            v.type = SLUA_T_BOOL;
-            v.i = lua_toboolean(L, idx) ? 1 : 0;
-            break;
-        case LUA_TNUMBER:
-            v.type = SLUA_T_NUMBER;
-            v.n = lua_tonumber(L, idx);
-            break;
-        case LUA_TINTEGER:
-        {
-            int isint = 0;
-            v.type = SLUA_T_INT;
-            v.i = lua_tointeger64(L, idx, &isint);
-            break;
-        }
-        case LUA_TSTRING:
-        {
-            size_t len = 0;
-            v.type = SLUA_T_STRING;
-            v.s = lua_tolstring(L, idx, &len);
-            v.len = (int32_t)len;
-            break;
-        }
-        case LUA_TVECTOR:
-        {
-            const float* f = lua_tovector(L, idx);
-            v.type = SLUA_T_VECTOR;
-            v.v[0] = f[0];
-            v.v[1] = f[1];
-            v.v[2] = f[2];
-            break;
-        }
-        default:
-            luaL_errorL(L, "argument %d: unsupported type %s", idx, luaL_typename(L, idx));
-        }
-    }
+        readValue(L, i + 1, args[i], scratch, true);
 
     slua_value rets[kMaxHostRets];
     std::memset(rets, 0, sizeof(rets));
@@ -241,32 +351,7 @@ int hostTrampoline(lua_State* L)
         luaL_errorL(L, "host function returned too many values");
 
     for (int i = 0; i < n; ++i)
-    {
-        const slua_value& v = rets[i];
-        switch (v.type)
-        {
-        case SLUA_T_NIL:
-            lua_pushnil(L);
-            break;
-        case SLUA_T_BOOL:
-            lua_pushboolean(L, v.i != 0);
-            break;
-        case SLUA_T_INT:
-            luaSL_pushnativeinteger(L, (int)v.i);
-            break;
-        case SLUA_T_NUMBER:
-            lua_pushnumber(L, v.n);
-            break;
-        case SLUA_T_STRING:
-            lua_pushlstring(L, v.s ? v.s : "", (size_t)v.len);
-            break;
-        case SLUA_T_VECTOR:
-            lua_pushvector(L, v.v[0], v.v[1], v.v[2]);
-            break;
-        default:
-            luaL_errorL(L, "host function returned unsupported type %d", v.type);
-        }
-    }
+        pushValue(L, rets[i], true);
     return n;
 }
 

@@ -38,8 +38,18 @@ internal static unsafe class Native
         ValueType.Number => Value.Num(v.N),
         ValueType.String => Value.Str(v.S == null ? "" : System.Text.Encoding.UTF8.GetString(v.S, v.Len)),
         ValueType.Vector => Value.Vec(v.V0, v.V1, v.V2),
+        ValueType.Key => Value.Key(v.S == null ? "" : System.Text.Encoding.UTF8.GetString(v.S, v.Len)),
+        ValueType.Rotation => Value.Rot(v.V0, v.V1, v.V2, v.V3),
+        ValueType.List => Value.List(ListItems(v)),
         _ => Value.Nil,
     };
+
+    static Value[] ListItems(in SluaValue v)
+    {
+        var items = new Value[v.Len];
+        for (int i = 0; i < items.Length; i++) items[i] = ToManaged(v.Items[i]);
+        return items;
+    }
 
     internal static void FromManaged(in Value m, SluaValue* o, Arena arena)
     {
@@ -52,6 +62,16 @@ internal static unsafe class Native
             case ValueType.Number: o->N = m.N; break;
             case ValueType.String: o->S = arena.Utf8(m.S ?? "", out o->Len); break;
             case ValueType.Vector: o->V0 = m.X; o->V1 = m.Y; o->V2 = m.Z; break;
+            case ValueType.Key: o->S = arena.Utf8(m.S ?? "", out o->Len); break;
+            case ValueType.Rotation: o->V0 = m.X; o->V1 = m.Y; o->V2 = m.Z; o->V3 = m.W; break;
+            case ValueType.List:
+            {
+                Value[] items = m.Items ?? Array.Empty<Value>();
+                o->Len = items.Length;
+                o->Items = (SluaValue*)arena.Alloc((nuint)(Math.Max(items.Length, 1) * sizeof(SluaValue)));
+                for (int i = 0; i < items.Length; i++) FromManaged(items[i], &o->Items[i], arena);
+                break;
+            }
         }
     }
 
