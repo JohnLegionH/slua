@@ -122,10 +122,23 @@ struct slua_script
     std::shared_ptr<IImage> image;
     std::shared_ptr<Script> script;
     int64_t tag = 0;
+    // The interval LLTimers last asked the host to wake the script at, 0 for none.
+    double timerInterval = 0.0;
 };
 
 namespace
 {
+
+// LLTimers tells the host when the next "timer" event is wanted. The host reads
+// it back with slua_timer_interval and dispatches the event itself.
+void timerEventRequest(lua_State* L, double interval)
+{
+    Script* script = Script::fromLuaState(L);
+    if (script == nullptr)
+        return;
+    if (slua_script* owner = static_cast<slua_script*>(script->getHostContext()))
+        owner->timerInterval = interval;
+}
 
 // Refuses a second concurrent caller instead of corrupting the VM.
 class VmGuard
@@ -604,6 +617,7 @@ SLUA_API int32_t slua_vm_new(int32_t watchdog_mode, slua_vm** out)
     callbacks.clockProvider = clockProvider;
     callbacks.populateEnvironment = populateEnvironment;
     callbacks.eventHandlerRegistrationCb = handlerRegistration;
+    callbacks.setTimerEventCb = timerEventRequest;
     switch (watchdog_mode)
     {
     case SLUA_WATCHDOG_RESIDENT:
@@ -967,7 +981,18 @@ SLUA_API int32_t slua_dispatch_event(slua_script* s, int32_t event, const slua_v
     SLUA_CATCH
 }
 
-SLUA_API int32_t slua_timer_interval(slua_script*, double*) { return SLUA_ERR_NOT_IMPLEMENTED; }
+SLUA_API int32_t slua_timer_interval(slua_script* s, double* seconds)
+{
+    SLUA_TRY
+    if (s == nullptr || seconds == nullptr)
+        return SLUA_ERR_BAD_ARG;
+    VmGuard guard(s->vm);
+    if (!guard.ok())
+        return SLUA_ERR_BUSY;
+    *seconds = s->timerInterval;
+    return SLUA_OK;
+    SLUA_CATCH
+}
 
 SLUA_API int32_t slua_kill(slua_script* s)
 {
