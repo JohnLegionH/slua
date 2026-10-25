@@ -229,10 +229,11 @@ public class ApiV2Tests
         Assert.Equal("OwnerSay str:Example Name", lines[1]);
         Assert.Equal("Euler2Rot vec:<0,0,0>", lines[2]);
         Assert.Equal("Rot2Euler rot:<1,2,3,4>", lines[3]);
-        Assert.Equal($"ListSort list:[int:3,num:1.5,str:a,key:{KeyA},vec:<1,2,3>,rot:<1,2,3,4>] int:1 int:1", lines[4]);
-        Assert.Equal($"DumpList2String list:[int:3,num:1.5,str:a,key:{KeyA},vec:<1,2,3>,rot:<1,2,3,4>] str:,", lines[5]);
-        Assert.Equal("OwnerSay str:dumped", lines[6]);
-        Assert.StartsWith("OwnerSay str:<0.0", lines[7]);
+        Assert.Equal("OwnerSay str:<1.00000, 2.00000, 3.00000>", lines[4]);
+        Assert.Equal($"ListSort list:[int:3,num:1.5,str:a,key:{KeyA},vec:<1,2,3>,rot:<1,2,3,4>] int:1 int:1", lines[5]);
+        Assert.Equal($"DumpList2String list:[int:3,num:1.5,str:a,key:{KeyA},vec:<1,2,3>,rot:<1,2,3,4>] str:,", lines[6]);
+        Assert.Equal("OwnerSay str:dumped", lines[7]);
+        Assert.Equal("OwnerSay str:<0.00000, 0.00000, 0.50000, 0.75000>", lines[8]);
     }
 
     // ---- Event arguments ----
