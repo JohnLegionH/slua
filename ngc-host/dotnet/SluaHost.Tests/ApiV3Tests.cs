@@ -77,6 +77,18 @@ public class ApiV3Tests
         throw new Xunit.Sdk.XunitException("script did not go idle");
     }
 
+    /// <summary>
+    /// LSL scripts take a first step that only enters the default state, so a test steps until the thing it waits for
+    /// has happened and returns the result of the step that got it there.
+    /// </summary>
+    static StepResult StepUntil(Script s, Func<bool> done)
+    {
+        StepResult r = default;
+        for (int i = 0; i < 10 && !done(); i++) r = s.Step(0.05);
+        Assert.True(done(), "the script never reached the point the test waits for");
+        return r;
+    }
+
     // ---- The version ----
 
     [Fact]
@@ -233,8 +245,8 @@ public class ApiV3Tests
         using (var rig = new Rig(pausing: false))
         {
             using var s = rig.Run(source, lsl: true);
-            // One step is long enough for the handler to reach the delayed call; the delay is pending and not yet served.
-            var first = s.Step(0.05);
+            // Stop at the step that reaches the delayed call: the delay is pending and not yet served.
+            var first = StepUntil(s, () => rig.Kit.Snapshot().Contains("Say int:0 str:delayed"));
             Assert.Equal(0f, first.SleepServed);
             linesBefore = rig.Kit.Snapshot();
             Assert.Contains("Say int:0 str:delayed", linesBefore);
@@ -308,7 +320,7 @@ public class ApiV3Tests
             }
             """, lsl: true, tag: 6);
 
-        Assert.Equal(StepStatus.Preempted, s.Step().Status);
+        Assert.Equal(StepStatus.Preempted, StepUntil(s, () => rig.Started.ContainsKey(6)).Status);
         Assert.Equal("str:card int:7", rig.Started[6]);
         Assert.Empty(rig.Kit.Snapshot());
 
@@ -363,7 +375,7 @@ public class ApiV3Tests
         using (var rig = new Rig())
         {
             using var s = rig.Run(source, lsl: true, tag: 6);
-            Assert.Equal(StepStatus.Preempted, s.Step().Status);
+            Assert.Equal(StepStatus.Preempted, StepUntil(s, () => rig.Started.ContainsKey(6)).Status);
             Assert.Equal(new[] { "OwnerSay str:before" }, rig.Kit.Snapshot());
             state = s.Serialize();
         }

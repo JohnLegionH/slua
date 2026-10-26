@@ -146,14 +146,18 @@ SLUA_API int32_t slua_vm_free(slua_vm* vm);
 // Host functions must be registered before the first script is created.
 SLUA_API int32_t slua_register_host_fn(slua_vm* vm, const char* table, const char* name, int32_t fn_id, slua_host_fn cb, void* user);
 SLUA_API int32_t slua_watchdog_stats(slua_vm* vm, uint64_t* fires, uint64_t* late_fires);
-// Registers table.name as a pausing function. A script calling it runs a wrapper the library
-// builds: it calls cb with start_id and the call's arguments (return values are ignored), yields
-// the script, and after the host steps the script again calls cb with take_id and no arguments;
-// the values that call returns are the values of table.name(...). A negative return from either
-// call raises a script error as for any host function; SLUA_RET_YIELD from either is an error,
-// because the wrapper does the yielding. The wrapper exists in the environment for SLua and for
-// LSL, so LSL compiled by the runtime's compiler calls it as it calls any ll function. Same
-// registration rule as slua_register_host_fn: before the first image is made.
+// Registers table.name as a pausing function. A script calling it runs a native function the
+// library binds under table.name: it calls cb with start_id and the call's arguments (return
+// values are ignored) and yields the script. After the host steps the script again, the library
+// calls cb with take_id and no arguments, and the values that call returns are the values of
+// table.name(...). A negative return from either call raises a script error as for any host
+// function; SLUA_RET_YIELD from either is an error, because the library does the yielding. It is
+// bound in the environment for SLua and for LSL alike, so LSL compiled by the runtime's compiler
+// calls it as it calls any ll function, and a script waiting inside it can be saved and restored.
+// (A Lua closure made in the environment cannot take this job: the saved-state writer accepts
+// only code that belongs to the script's own image.) Same registration rule as
+// slua_register_host_fn: before the first image is made. start_id and take_id are passed back to
+// cb to tell the two calls apart; they need not differ from other registered ids.
 SLUA_API int32_t slua_register_pausing_fn(slua_vm* vm, const char* table, const char* name, int32_t start_id, int32_t take_id, slua_host_fn cb, void* user);
 
 // Loads an asset into an image that any number of scripts in this VM can share.

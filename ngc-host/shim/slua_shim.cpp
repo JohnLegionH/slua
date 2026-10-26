@@ -22,6 +22,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cfloat>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -82,6 +84,16 @@ bool handlerRegistration(lua_State* L, const char* event_name, bool registered)
     return true;
 }
 
+// A plain host function is bound to table.name directly. A pausing function is registered as a
+// pair of records: the start call (carrying table.name) and the take call right after it. Neither
+// is bound by name; the environment binds the library's wrapper under table.name instead.
+enum class HostFnKind
+{
+    Plain,
+    PausingStart,
+    PausingTake,
+};
+
 struct HostFnRec
 {
     std::string table;
@@ -89,6 +101,7 @@ struct HostFnRec
     int32_t id;
     slua_host_fn cb;
     void* user;
+    HostFnKind kind = HostFnKind::Plain;
 };
 
 } // namespace
@@ -124,6 +137,8 @@ struct slua_script
     int64_t tag = 0;
     // The interval LLTimers last asked the host to wake the script at, 0 for none.
     double timerInterval = 0.0;
+    // Host functions of this script that are running now; slua_add_sleep is valid only while this is above zero.
+    std::atomic<int> hostCallDepth{0};
 };
 
 namespace
@@ -181,7 +196,13 @@ uint64_t hashFunctionList(const std::vector<HostFnRec>& fns)
 {
     std::vector<std::string> names;
     for (const HostFnRec& f : fns)
-        names.push_back(f.table + "." + f.name);
+    {
+        if (f.kind == HostFnKind::PausingTake)
+            continue;
+        // A pausing function is a different binding from a plain function of the same name:
+        // a saved script can be waiting inside its wrapper.
+        names.push_back(f.table + "." + f.name + (f.kind == HostFnKind::PausingStart ? "!pausing" : ""));
+    }
     std::sort(names.begin(), names.end());
     std::string all;
     for (const std::string& n : names)
@@ -349,13 +370,34 @@ void pushValue(lua_State* L, const slua_value& v, bool allowList)
     }
 }
 
+// Marks a script as inside a host function for as long as the call runs.
+class HostCallScope
+{
+public:
+    explicit HostCallScope(slua_script* owner)
+        : mOwner(owner)
+    {
+        if (mOwner)
+            mOwner->hostCallDepth.fetch_add(1);
+    }
+    ~HostCallScope()
+    {
+        if (mOwner)
+            mOwner->hostCallDepth.fetch_sub(1);
+    }
+    HostCallScope(const HostCallScope&) = delete;
+    HostCallScope& operator=(const HostCallScope&) = delete;
+
+private:
+    slua_script* mOwner;
+};
+
 // Copies the script's arguments into flat records, calls the managed host
 // function, and pushes whatever it returns. Runs on the script's thread,
 // inside lua_resume. luaL_errorL unwinds only native frames up to the
 // Executor's own catch of lua_exception.
-int hostTrampoline(lua_State* L)
+int runHost(lua_State* L, int index, bool resumed)
 {
-    const int index = (int)lua_tonumber(L, lua_upvalueindex(1));
     Script* script = Script::fromLuaState(L);
     if (script == nullptr)
         luaL_errorL(L, "host function called outside a script");
@@ -366,7 +408,8 @@ int hostTrampoline(lua_State* L)
     slua_script* owner = static_cast<slua_script*>(script->getHostContext());
     const int64_t tag = owner ? owner->tag : 0;
 
-    const int nargs = lua_gettop(L);
+    // The take call of a pausing function has no arguments; whatever is on the stack is not the script's.
+    const int nargs = resumed ? 0 : lua_gettop(L);
     if (nargs > kMaxHostArgs)
         luaL_errorL(L, "too many arguments (%d)", nargs);
     slua_value args[kMaxHostArgs];
@@ -376,8 +419,16 @@ int hostTrampoline(lua_State* L)
 
     slua_value rets[kMaxHostRets];
     std::memset(rets, 0, sizeof(rets));
-    const int32_t n = fn.cb(fn.user, fn.id, tag, args, nargs, rets, kMaxHostRets);
+    int32_t n;
+    {
+        HostCallScope inCall(owner);
+        n = fn.cb(fn.user, fn.id, tag, args, nargs, rets, kMaxHostRets);
+    }
 
+    if (fn.kind != HostFnKind::Plain && n == SLUA_RET_YIELD)
+        luaL_errorL(L, "a pausing function's host call cannot yield; the library yields for it");
+    if (fn.kind == HostFnKind::PausingStart && n >= 0)
+        return lua_yield(L, 0); // the start call's values are not the call's results; the script waits
     if (n == SLUA_RET_YIELD)
         return lua_yield(L, 0);
     if (n < 0)
@@ -397,6 +448,21 @@ int hostTrampoline(lua_State* L)
     return n;
 }
 
+int hostTrampoline(lua_State* L)
+{
+    return runHost(L, (int)lua_tonumber(L, lua_upvalueindex(1)), false);
+}
+
+// A pausing function's closure holds the index of its start record; its take record follows it.
+// When the host steps the script again, Luau calls this in place of returning to the script, and
+// the take call's values become the pausing call's results.
+int pausingContinuation(lua_State* L, int status)
+{
+    if (status != LUA_OK)
+        luaL_errorL(L, "pausing function was not resumed normally (%d)", status);
+    return runHost(L, (int)lua_tonumber(L, lua_upvalueindex(1)) + 1, true);
+}
+
 void populateEnvironment(IEnvironment& environment, lua_State* L)
 {
     luaSL_set_constant_globals(L);
@@ -406,6 +472,8 @@ void populateEnvironment(IEnvironment& environment, lua_State* L)
     for (size_t i = 0; i < vm->fns.size(); ++i)
     {
         const HostFnRec& f = vm->fns[i];
+        if (f.kind == HostFnKind::PausingTake)
+            continue;
         lua_getglobal(L, f.table.c_str());
         if (!lua_istable(L, -1))
         {
@@ -415,9 +483,15 @@ void populateEnvironment(IEnvironment& environment, lua_State* L)
             lua_setglobal(L, f.table.c_str());
         }
         // The upvalue is the index into the VM's function table. Ares sees the
-        // closure as a permanent because it is reachable from _G by name.
+        // closure as a permanent because it is reachable from _G by name. A pausing function
+        // is a native closure with a continuation: a Lua closure made in the environment
+        // cannot be saved while a script waits inside it, because the saved-state writer
+        // accepts only code that is part of the script's own image.
         lua_pushnumber(L, (double)i);
-        lua_pushcclosurek(L, hostTrampoline, f.name.c_str(), 1, nullptr);
+        if (f.kind == HostFnKind::PausingStart)
+            lua_pushcclosurek(L, hostTrampoline, f.name.c_str(), 1, pausingContinuation);
+        else
+            lua_pushcclosurek(L, hostTrampoline, f.name.c_str(), 1, nullptr);
         lua_rawsetfield(L, -2, f.name.c_str());
         lua_pop(L, 1);
     }
@@ -690,14 +764,36 @@ SLUA_API int32_t slua_watchdog_stats(slua_vm* vm, uint64_t* fires, uint64_t* lat
 
 SLUA_API int32_t slua_register_pausing_fn(slua_vm* vm, const char* table, const char* name, int32_t start_id, int32_t take_id, slua_host_fn cb, void* user)
 {
-    (void)vm; (void)table; (void)name; (void)start_id; (void)take_id; (void)cb; (void)user;
-    return SLUA_ERR_NOT_IMPLEMENTED;
+    SLUA_TRY
+    if (vm == nullptr || table == nullptr || name == nullptr || cb == nullptr)
+        return SLUA_ERR_BAD_ARG;
+    VmGuard guard(vm);
+    if (!guard.ok())
+        return SLUA_ERR_BUSY;
+    if (!vm->environments.empty())
+        return SLUA_ERR_STATE;
+    vm->fns.push_back(HostFnRec{table, name, start_id, cb, user, HostFnKind::PausingStart});
+    vm->fns.push_back(HostFnRec{table, name, take_id, cb, user, HostFnKind::PausingTake});
+    vm->fnHash = hashFunctionList(vm->fns);
+    return SLUA_OK;
+    SLUA_CATCH
 }
 
 SLUA_API int32_t slua_add_sleep(slua_script* s, double seconds)
 {
-    (void)s; (void)seconds;
-    return SLUA_ERR_NOT_IMPLEMENTED;
+    SLUA_TRY
+    if (s == nullptr || !(seconds > 0.0) || seconds > (double)FLT_MAX)
+        return SLUA_ERR_BAD_ARG;
+    // Called from inside the script's own host function, so the VM guard is already held by this
+    // thread and is not taken again.
+    if (s->hostCallDepth.load() == 0)
+        return SLUA_ERR_STATE;
+    const float total = s->script->getSleep() + (float)seconds;
+    if (!std::isfinite(total))
+        return SLUA_ERR_BAD_ARG;
+    s->script->setSleep(total);
+    return SLUA_OK;
+    SLUA_CATCH
 }
 
 SLUA_API int32_t slua_image_new(slua_vm* vm, const uint8_t* asset, size_t len, slua_image** out)
