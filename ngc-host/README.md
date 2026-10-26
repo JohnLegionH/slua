@@ -65,7 +65,7 @@ library belongs to NGC itself; the `SluaHost` code here is for testing only.
 
 ## API version
 
-`slua_api_version()` returns `SLUA_API_VERSION` (currently 3). Changing or removing an export (its
+`slua_api_version()` returns `SLUA_API_VERSION` (currently 4). Changing or removing an export (its
 signature, the meaning of a result code, the layout of `slua_value` or `slua_step_result`) bumps it;
 adding an export does not. A host requires an exact match and checks it before calling anything
 else. `slua_struct_size` reports the library's `sizeof` for those two structs so a host can check its
@@ -77,6 +77,19 @@ pausing function the library binds) and `slua_debug_alloc_stats` (what the libra
 a version bump because a host built for version 2 cannot make pausing calls that survive a save, and
 a saved state records the bound-function list, which now distinguishes a pausing function from a
 plain one of the same name.
+
+Version 4 added `slua_set_engine_identity` and `slua_engine_name` (the host names the engine; the
+library has no names of its own), `slua_handler_mask` (the events a script handles), and two fields
+in the step result: `cpu_seconds` and `handlers_changed` (the struct grew to 32 bytes). It also
+changed three behaviours, which is why it is a version bump: the delay a script asks for is reported
+by the step that is running instead of the next one, a host function that asks for a delay and
+returns no values ends the script's turn, and a compile error in an LSL script reports the line it is
+on (it was reported one line too high; the line for SLua was already right). A host that built for
+version 3 and corrected for the LSL line must drop the correction.
+
+The C# test binding here refuses a library of another version: `Host.Init()` throws
+`ApiVersionMismatchException`, whose message names both numbers ("The SLua native library is API
+version 3; this host needs API version 4.").
 
 ## Threading rule
 
@@ -139,6 +152,12 @@ Lifecycle and information:
 - `slua_api_version()`: the API version. `slua_struct_size(which)`: `SLUA_STRUCT_VALUE` or
   `SLUA_STRUCT_STEP_RESULT`.
 - `slua_set_log(fn)`: one process-wide log callback (`level` 0 debug to 3 error).
+- `slua_set_engine_identity(engine, alt_engine, alt_header)`: the host names the engine at
+  start-up, before the first compile. The names appear in the compile refusal for LSL scripts that
+  call `os*`, `iw*` or `bot*` functions (`SLUA_ERR_UNSUPPORTED_FUNCTION`): `engine` is this engine,
+  `alt_engine` the engine that runs such scripts and `alt_header` the script header that selects it.
+  Any of them may be NULL or empty, and the text then says less; the library has no built-in names.
+  `slua_engine_name(buf, cap)` reads the engine name back.
 - `slua_init()`: one-time setup; every export that needs it calls it.
 - `slua_free(p)`: releases memory the library returned.
 - `slua_busy_violations()`: the process-wide count of refused concurrent calls.
@@ -179,8 +198,14 @@ Images and scripts:
 - `slua_step(script, quanta_seconds, &result)`: one scheduling step. Serves sleep, then resumes
   the handler in flight or runs the pending `state_exit` / `state_entry`. `result.status` is
   `SLUA_STEP_OK`, `_PREEMPTED` (resume with another step), `_STATE_CHANGE`, `_FAULT`,
-  `_NOT_RUN`, `_REFUSED` or `_IDLE` (nothing left to run). `sleep_served` is the sleep the
-  script asked for, in seconds, which a scheduler should honour before the next step.
+  `_NOT_RUN`, `_REFUSED` or `_IDLE` (nothing left to run). `sleep_served` is the delay the
+  script asked for in this step, in seconds, which a scheduler should honour before the next step.
+  `cpu_seconds` is the CPU time the calling thread used during the step: `GetThreadTimes` on
+  Windows, which the system counts in ticks of about 15 ms, and `CLOCK_THREAD_CPUTIME_ID` on Linux;
+  0 for an idle step. Run windows are wall time, so a scheduler that wants to tell a script that
+  burns CPU from one the system kept off the processor compares the two.
+  `handlers_changed` is 1 when the script's handler set differs from what the host last read or
+  was told (see `slua_handler_mask`).
 - `slua_event_index(name)`: the event number for an LSL event name.
 - `slua_dispatch_event(script, event, args, nargs, quanta_seconds, &result)`: starts an event
   handler with up to 32 arguments and runs its first step. Valid only when no handler is in
@@ -190,11 +215,21 @@ Images and scripts:
   the library keeps the handler set current.
 - `slua_timer_interval(script, &seconds)`: the interval an SLua script last asked for through
   `LLTimers`, 0 when it has none. The host dispatches a `timer` event at that time.
-- `slua_add_sleep(script, seconds)`: adds a delay to the script. The next step reports it in
-  `sleep_served`, and the scheduler waits that long before stepping the script again. Valid only
+- `slua_handler_mask(script, &mask, &known)`: the events the script handles now, one bit each: the
+  bit of the event that `slua_event_index` numbers `i` is `1 << (i - 1)`. `known` is 1 when the set
+  is complete: always for LSL (the mask of the current state), and for SLua once the main chunk
+  has run, because SLua registers handlers while it runs (`LLEvents:on` and `:off`). A host keeps a
+  prim's event flags current from this: read the mask when the script starts, and again after any
+  step whose result has `handlers_changed` set. Reading the mask counts as telling the host, so the
+  next step flags a change only from the set the host read. `known` may be NULL.
+- `slua_add_sleep(script, seconds)`: adds a delay to the script. The step that is running reports
+  it in `sleep_served`, and the scheduler waits that long before stepping the script again. If the
+  host function that asked returns no values the script also yields when the function returns (the
+  step's status is `SLUA_STEP_PREEMPTED`), as `llSleep` ends a script's turn in Second Life; a
+  function that returns values keeps them and does not yield by itself. Valid only
   inside a host function that this script called (`SLUA_ERR_STATE` anywhere else, including from
   another script's host function), on the thread running that function. `seconds` must be finite
-  and above zero (`SLUA_ERR_BAD_ARG`). Calls add up. The delay is part of the saved state.
+  and above zero (`SLUA_ERR_BAD_ARG`). Calls add up.
 - `slua_kill(script)`: aborts a handler in flight, or faults an idle script.
 - `slua_fault(script, &kind, buf, cap)`: the fault kind (`SLUA_FAULT_*`) and its text.
 
@@ -257,10 +292,11 @@ way (0 means the default). The Executor's unchecked setter is not exposed.
 
 Many `ll` functions make the calling script wait after they return (the call delays of the Second
 Life wiki). A host function does that with `slua_add_sleep` from inside the call, rather than by
-sleeping itself. The step that follows reports the total in `sleep_served`; the scheduler honours it
-(the engine's own punishment for an overrunning script travels the same way). A script that asked for
-a delay is paused by the runtime at its next safe point. A delay that has been asked for and not
-yet served is saved with the script and reported again by the first step after a restore.
+sleeping itself. The step that is running reports the total in `sleep_served` when it returns; the
+scheduler honours it (the engine's own punishment for an overrunning script travels the same way). A
+call that returns no values also ends the script's turn, so the code after it runs only once the
+delay has been served; for a call that returns values the script is paused at its next safe point.
+The step hands the delay to the host, so a script saved while it waits owes none when it is restored.
 
 ## Pausing calls
 

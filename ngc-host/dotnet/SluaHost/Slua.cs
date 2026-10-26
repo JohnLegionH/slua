@@ -80,17 +80,32 @@ public static unsafe class Host
     public static readonly Value[] Yield = new Value[0];
 
     /// <summary>The API version of slua_shim.h this host was written for. <see cref="Init"/> refuses a library of any other version.</summary>
-    public const int RequiredApiVersion = 3;
+    public const int RequiredApiVersion = 4;
 
     /// <summary>Throws <see cref="ApiVersionMismatchException"/>, naming both versions, when <paramref name="library"/> is not <see cref="RequiredApiVersion"/>.</summary>
     internal static void VerifyApiVersion(int library)
     {
+        if (library != RequiredApiVersion)
+            throw new ApiVersionMismatchException(library, RequiredApiVersion);
+    }
+
+    // Version 1 has no slua_api_version export.
+    static int LibraryApiVersion()
+    {
+        try { return Native.slua_api_version(); }
+        catch (EntryPointNotFoundException) { return 1; }
     }
 
     /// <summary>Init, with the library's API version supplied by the caller instead of read from the library.</summary>
     internal static void InitWith(Func<int> libraryApiVersion)
     {
-        Init();
+        VerifyApiVersion(libraryApiVersion());
+        lock (_initLock)
+        {
+            if (_init) return;
+            Check("slua_init", Native.slua_init());
+            _init = true;
+        }
     }
 
     /// <summary>
@@ -100,10 +115,21 @@ public static unsafe class Host
     /// </summary>
     public static void SetEngineIdentity(string? engineName, string? altEngineName = null, string? altEngineHeader = null)
     {
+        Init();
+        Check("slua_set_engine_identity", Native.slua_set_engine_identity(engineName, altEngineName, altEngineHeader));
     }
 
     /// <summary>The engine name the library holds (empty when none was set).</summary>
-    public static string EngineName => "";
+    public static string EngineName
+    {
+        get
+        {
+            Init();
+            byte* buf = stackalloc byte[256];
+            Check("slua_engine_name", Native.slua_engine_name(buf, 256));
+            return Marshal.PtrToStringUTF8((IntPtr)buf)!;
+        }
+    }
 
     internal const int Ok = 0;
     internal const int RestoredFresh = 1;
@@ -127,17 +153,14 @@ public static unsafe class Host
         if (code < 0) throw new SluaException(what, code);
     }
 
-    static bool _init;
+    static volatile bool _init;
     static readonly object _initLock = new();
 
+    /// <summary>Checks the library's API version against <see cref="RequiredApiVersion"/> and initialises it.</summary>
     public static void Init()
     {
-        lock (_initLock)
-        {
-            if (_init) return;
-            Check("slua_init", Native.slua_init());
-            _init = true;
-        }
+        if (_init) return;
+        InitWith(LibraryApiVersion);
     }
 
     public static string Version()

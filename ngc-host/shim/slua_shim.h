@@ -23,6 +23,12 @@
 //   3  slua_add_sleep (a host function adds a delay to its script), slua_register_pausing_fn
 //      (a pausing function the library binds, which a waiting script can be saved inside) and
 //      slua_debug_alloc_stats (what the library holds right now).
+//   4  slua_set_engine_identity and slua_engine_name (the host names the engine; the library has no
+//      names of its own), slua_handler_mask (the events a script handles) and, in the step result,
+//      cpu_seconds, handlers_changed and a reserved word (the struct is 32 bytes). The delay a script
+//      asks for (slua_add_sleep) is reported by the step that is running, not the next one, and a
+//      host function that asks for a delay and returns no values ends the script's turn. LSL
+//      compile errors report the line they are on (they were one too high).
 //
 // Versioning rule: changing or removing an export bumps SLUA_API_VERSION. That means a change to
 // the signature of an export, to the meaning of a result code, or to the layout of slua_value or
@@ -58,7 +64,7 @@
 #define SLUA_ERR_UNSUPPORTED_FUNCTION (-10) // LSL source calls an os*, iw* or bot* function; *err names it
 
 // The API version this header describes; see the versioning rule above.
-#define SLUA_API_VERSION 3
+#define SLUA_API_VERSION 4
 
 // Highest memory limit a script can have. A host may lower a limit, never raise it past this.
 #define SLUA_MEMORY_LIMIT_MAX (128 * 1024)

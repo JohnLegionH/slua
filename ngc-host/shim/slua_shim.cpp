@@ -62,12 +62,24 @@ namespace
 
 constexpr int kMaxHostArgs = 32;
 
-// The engine that runs LSL scripts calling os*, iw* and bot* functions, as named
-// in the compile refusal. The header token that selects it is a placeholder
-// until it is decided; this is the only place either is written.
-constexpr const char* kOsFunctionEngineName = "Phlox";
-constexpr const char* kOsFunctionEngineHeader = "//engine:PLACEHOLDER";
 constexpr int kMaxHostRets = 8;
+
+// The names the host supplied with slua_set_engine_identity, used in the compile refusal for LSL
+// scripts that call os*, iw* and bot* functions. The library has no names of its own.
+struct EngineIdentity
+{
+    std::string engine;    // this engine
+    std::string altEngine; // the engine that runs scripts using those functions
+    std::string altHeader; // the script header that selects it
+};
+std::mutex gIdentityMutex;
+EngineIdentity gIdentity;
+
+EngineIdentity identitySnapshot()
+{
+    std::lock_guard<std::mutex> lock(gIdentityMutex);
+    return gIdentity;
+}
 
 std::atomic<int32_t> gBusyViolations{0};
 std::atomic<slua_log_fn> gLog{nullptr};
@@ -580,14 +592,24 @@ void collectUndeclaredHostFunctions(const std::string& text, std::vector<std::st
 
 std::string unsupportedFunctionMessage(const std::vector<std::string>& names)
 {
+    const EngineIdentity id = identitySnapshot();
     std::string msg;
     for (const std::string& n : names)
         msg += (msg.empty() ? "" : ", ") + n;
-    msg += ": not available in this script engine. LSL scripts that call os*, iw* or bot* functions run on the ";
-    msg += kOsFunctionEngineName;
-    msg += " engine (script header ";
-    msg += kOsFunctionEngineHeader;
-    msg += ").";
+    msg += ": not available in ";
+    msg += id.engine.empty() ? std::string("this script engine") : "the " + id.engine + " script engine";
+    msg += ". LSL scripts that call os*, iw* or bot* functions ";
+    if (id.altEngine.empty())
+    {
+        msg += "are not supported here.";
+    }
+    else
+    {
+        msg += "run on the " + id.altEngine + " engine";
+        if (!id.altHeader.empty())
+            msg += " (script header " + id.altHeader + ")";
+        msg += ".";
+    }
     return msg;
 }
 
@@ -705,12 +727,25 @@ SLUA_API int32_t slua_set_log(slua_log_fn fn)
 
 SLUA_API int32_t slua_set_engine_identity(const char* engine_name, const char* alt_engine_name, const char* alt_engine_header)
 {
-    return SLUA_ERR_NOT_IMPLEMENTED;
+    SLUA_TRY
+    EngineIdentity id;
+    id.engine = engine_name ? engine_name : "";
+    id.altEngine = alt_engine_name ? alt_engine_name : "";
+    id.altHeader = alt_engine_header ? alt_engine_header : "";
+    std::lock_guard<std::mutex> lock(gIdentityMutex);
+    gIdentity = std::move(id);
+    return SLUA_OK;
+    SLUA_CATCH
 }
 
 SLUA_API int32_t slua_engine_name(char* buf, int32_t cap)
 {
-    return SLUA_ERR_NOT_IMPLEMENTED;
+    SLUA_TRY
+    if (buf == nullptr || cap <= 0)
+        return SLUA_ERR_BAD_ARG;
+    std::snprintf(buf, (size_t)cap, "%s", identitySnapshot().engine.c_str());
+    return SLUA_OK;
+    SLUA_CATCH
 }
 
 SLUA_API int32_t slua_init(void)
@@ -759,6 +794,8 @@ SLUA_API int32_t slua_compile(const char* src, size_t len, int32_t is_lsl, uint8
 
     std::string source(src, len);
     std::string asset;
+    // Luau counts lines from 0, so SLua errors add 1. The LSL compiler's locations already count from 1.
+    const int lineBase = is_lsl ? 0 : 1;
     try
     {
         if (is_lsl)
@@ -781,7 +818,7 @@ SLUA_API int32_t slua_compile(const char* src, size_t len, int32_t is_lsl, uint8
         std::vector<std::string> osNames;
         for (const Luau::ParseError& pe : e.getErrors())
         {
-            msg += std::to_string(pe.getLocation().begin.line + 1) + ": " + pe.what() + "\n";
+            msg += std::to_string(pe.getLocation().begin.line + lineBase) + ": " + pe.what() + "\n";
             if (is_lsl)
                 collectUndeclaredHostFunctions(pe.what(), osNames);
         }
@@ -795,7 +832,7 @@ SLUA_API int32_t slua_compile(const char* src, size_t len, int32_t is_lsl, uint8
     }
     catch (Luau::CompileError& e)
     {
-        *err = dupString(std::to_string(e.getLocation().begin.line + 1) + ": " + e.what());
+        *err = dupString(std::to_string(e.getLocation().begin.line + lineBase) + ": " + e.what());
         return SLUA_ERR_COMPILE;
     }
     catch (std::exception& e)
