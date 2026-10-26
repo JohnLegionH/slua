@@ -34,6 +34,18 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#elif defined(__GLIBC__)
+#include <malloc.h>
+#endif
+
 // The runtime part of the saved-state stamp: the pinned parent commit, or a hash of the parent
 // tree (see ngc-host/stamp.cmake). Set by the build.
 #ifndef SLUA_RUNTIME_COMMIT
@@ -108,7 +120,22 @@ struct HostFnRec
 
 } // namespace
 
-struct slua_vm : public Provisioner<Script>
+// Live-object counts for slua_debug_alloc_stats. A base class counts in its constructor and
+// destructor, so every path that makes or frees one is covered.
+template<typename Tag>
+struct LiveCounted
+{
+    static std::atomic<int64_t>& count()
+    {
+        static std::atomic<int64_t> n{0};
+        return n;
+    }
+    LiveCounted() { count()++; }
+    LiveCounted(const LiveCounted&) = delete;
+    ~LiveCounted() { count()--; }
+};
+
+struct slua_vm : public Provisioner<Script>, LiveCounted<slua_vm>
 {
     explicit slua_vm(const HostCallbacks& callbacks)
         : Provisioner<Script>(callbacks)
@@ -125,13 +152,13 @@ struct slua_vm : public Provisioner<Script>
     uint64_t fnHash = 0;
 };
 
-struct slua_image
+struct slua_image : LiveCounted<slua_image>
 {
     slua_vm* vm = nullptr;
     std::shared_ptr<IImage> image;
 };
 
-struct slua_script
+struct slua_script : LiveCounted<slua_script>
 {
     slua_vm* vm = nullptr;
     std::shared_ptr<IImage> image;
@@ -547,14 +574,62 @@ std::string unsupportedFunctionMessage(const std::vector<std::string>& names)
     return msg;
 }
 
+// Blocks handed to the host (compiled assets, saved state, error text) are released with
+// slua_free. Each carries a 16-byte header with its size so the library can say how many
+// are outstanding.
+std::atomic<int64_t> gOutBlocks{0};
+std::atomic<int64_t> gOutBytes{0};
+constexpr size_t kBlockHeader = 16;
+
+void* outAlloc(size_t size)
+{
+    char* base = (char*)std::malloc(size + kBlockHeader);
+    if (base == nullptr)
+        return nullptr;
+    std::memcpy(base, &size, sizeof size);
+    gOutBlocks++;
+    gOutBytes += (int64_t)size;
+    return base + kBlockHeader;
+}
+
+void outFree(void* p)
+{
+    if (p == nullptr)
+        return;
+    char* base = (char*)p - kBlockHeader;
+    size_t size;
+    std::memcpy(&size, base, sizeof size);
+    gOutBlocks--;
+    gOutBytes -= (int64_t)size;
+    std::free(base);
+}
+
 char* dupString(const std::string& s)
 {
-    char* p = (char*)std::malloc(s.size() + 1);
+    char* p = (char*)outAlloc(s.size() + 1);
     if (p == nullptr)
         throw std::bad_alloc();
     std::memcpy(p, s.data(), s.size());
     p[s.size()] = 0;
     return p;
+}
+
+// Bytes in use on the process's C heap: the figure does not move when the system allocator
+// grows or returns address space. 0 where the system gives none.
+uint64_t heapInUseBytes()
+{
+#if defined(_WIN32)
+    HEAP_SUMMARY hs;
+    hs.cb = sizeof hs;
+    if (HeapSummary(GetProcessHeap(), 0, &hs))
+        return (uint64_t)hs.cbAllocated;
+    return 0;
+#elif defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33))
+    struct mallinfo2 mi = mallinfo2();
+    return (uint64_t)mi.uordblks + (uint64_t)mi.hblkhd;
+#else
+    return 0;
+#endif
 }
 
 } // namespace
@@ -627,14 +702,22 @@ SLUA_API int32_t slua_debug_alloc_stats(uint64_t* out, int32_t n)
 {
     if (out == nullptr || n < 0 || n > 6)
         return SLUA_ERR_BAD_ARG;
+    const uint64_t v[6] = {
+        (uint64_t)LiveCounted<slua_vm>::count().load(),
+        (uint64_t)LiveCounted<slua_image>::count().load(),
+        (uint64_t)LiveCounted<slua_script>::count().load(),
+        (uint64_t)gOutBlocks.load(),
+        (uint64_t)gOutBytes.load(),
+        heapInUseBytes(),
+    };
     for (int32_t i = 0; i < n; i++)
-        out[i] = 0;
+        out[i] = v[i];
     return SLUA_OK;
 }
 
 SLUA_API void slua_free(void* p)
 {
-    std::free(p);
+    outFree(p);
 }
 
 SLUA_API int32_t slua_compile(const char* src, size_t len, int32_t is_lsl, uint8_t** out, size_t* out_len, char** err)
@@ -694,7 +777,7 @@ SLUA_API int32_t slua_compile(const char* src, size_t len, int32_t is_lsl, uint8
         return SLUA_ERR_COMPILE;
     }
 
-    uint8_t* mem = (uint8_t*)std::malloc(asset.size() ? asset.size() : 1);
+    uint8_t* mem = (uint8_t*)outAlloc(asset.size() ? asset.size() : 1);
     if (mem == nullptr)
         return SLUA_ERR_EXCEPTION;
     std::memcpy(mem, asset.data(), asset.size());
@@ -1164,7 +1247,7 @@ SLUA_API int32_t slua_serialize(slua_script* s, uint8_t** out, size_t* out_len)
     put64(blob, s->vm->fnHash);
     blob += payload;
 
-    uint8_t* mem = (uint8_t*)std::malloc(blob.size());
+    uint8_t* mem = (uint8_t*)outAlloc(blob.size());
     if (mem == nullptr)
         return SLUA_ERR_EXCEPTION;
     std::memcpy(mem, blob.data(), blob.size());
