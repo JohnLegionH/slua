@@ -6,6 +6,8 @@ using Xunit;
 namespace SluaHost.Tests;
 
 /// <summary>Tests for the native layer's additions in API version 2: versioning, memory limits, the os*/iw*/bot* refusal, key/rotation/list values, event arguments and shared images.</summary>
+// The engine identity is process-wide; the refusal tests below set it, so they share a collection with the identity tests.
+[Collection("engine identity")]
 public class ApiV2Tests
 {
     const string KeyA = "12345678-9abc-def0-1234-56789abcdef0";
@@ -104,12 +106,12 @@ public class ApiV2Tests
     [InlineData("botCreateBot")]
     public void B5_LslCallToAnOsIwOrBotFunctionIsRefusedAndNamed(string fn)
     {
-        Host.Init();
+        Host.SetEngineIdentity("Example Engine", "Example Host", "//engine:example");
         string src = $"default {{ state_entry() {{ llOwnerSay((string){fn}()); }} }}";
         var e = Assert.Throws<SluaException>(() => Host.Compile(src, true));
         Assert.Equal(-10, e.Code);
         Assert.Contains(fn, e.Message);
-        Assert.Contains("Phlox", e.Message);
+        Assert.Contains("Example Host", e.Message);
         Assert.Contains("os*, iw* or bot*", e.Message);
     }
 
@@ -131,7 +133,7 @@ public class ApiV2Tests
         Host.Init();
         var e = Assert.Throws<SluaException>(() => Host.Compile("default { state_entry() { llNoSuchFunction(); } }", true));
         Assert.Equal(-5, e.Code);
-        Assert.DoesNotContain("Phlox", e.Message);
+        Assert.DoesNotContain("Example Host", e.Message);
     }
 
     [Fact]
