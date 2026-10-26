@@ -10,20 +10,15 @@ set(SLUA_SHIM_INJECTED ON)
 set(SLUA_SHIM_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
 function(slua_define_shim)
-    # The runtime commit the shim is built from, recorded in saved state.
-    execute_process(
-        COMMAND git -C "${CMAKE_SOURCE_DIR}" rev-parse --short=10 HEAD
-        OUTPUT_VARIABLE SLUA_RUNTIME_COMMIT
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET)
-    if(NOT SLUA_RUNTIME_COMMIT)
-        set(SLUA_RUNTIME_COMMIT "unknown")
+    # The runtime part of the saved-state stamp, worked out by the wrapper project (stamp.cmake).
+    if(NOT SLUA_RUNTIME_STAMP)
+        message(FATAL_ERROR "SLUA_RUNTIME_STAMP is not set; configure through ngc-host/CMakeLists.txt.")
     endif()
 
     add_library(slua_shim SHARED "${SLUA_SHIM_DIR}/shim/slua_shim.cpp" "${SLUA_SHIM_DIR}/shim/slua_shim.h")
     target_include_directories(slua_shim PRIVATE "${SLUA_SHIM_DIR}/shim")
     target_compile_features(slua_shim PRIVATE cxx_std_17)
-    target_compile_definitions(slua_shim PRIVATE SLUA_RUNTIME_COMMIT="${SLUA_RUNTIME_COMMIT}")
+    target_compile_definitions(slua_shim PRIVATE SLUA_RUNTIME_COMMIT="${SLUA_RUNTIME_STAMP}")
     target_link_libraries(slua_shim PRIVATE Luau.Executor Luau.VM Luau.Compiler Luau.LSLBuiltins Luau.Bytecode Luau.Common libtailslide)
     if(MSVC)
         target_compile_options(slua_shim PRIVATE /EHsc)

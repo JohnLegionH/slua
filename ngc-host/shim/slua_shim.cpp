@@ -34,6 +34,8 @@
 #include <string>
 #include <vector>
 
+// The runtime part of the saved-state stamp: the pinned parent commit, or a hash of the parent
+// tree (see ngc-host/stamp.cmake). Set by the build.
 #ifndef SLUA_RUNTIME_COMMIT
 #define SLUA_RUNTIME_COMMIT "unknown"
 #endif
@@ -565,12 +567,20 @@ char* dupString(const std::string& s)
         return SLUA_ERR_EXCEPTION;                                \
     }
 
+// The build part of the saved-state stamp, also what slua_version reports. A further part
+// (for example the version of the LSL compiler patch) is appended here as " name=value".
+static const std::string& stampText()
+{
+    static const std::string text = std::string("runtime=") + SLUA_RUNTIME_COMMIT + " api=" + std::to_string((int)SLUA_API_VERSION);
+    return text;
+}
+
 SLUA_API int32_t slua_version(char* buf, int32_t cap)
 {
     SLUA_TRY
     if (buf == nullptr || cap <= 0)
         return SLUA_ERR_BAD_ARG;
-    std::snprintf(buf, (size_t)cap, "runtime=%s api=%d", SLUA_RUNTIME_COMMIT, (int)SLUA_API_VERSION);
+    std::snprintf(buf, (size_t)cap, "%s", stampText().c_str());
     return SLUA_OK;
     SLUA_CATCH
 }
@@ -1139,9 +1149,9 @@ SLUA_API int32_t slua_serialize(slua_script* s, uint8_t** out, size_t* out_len)
 
     std::string blob = "SLSH";
     put32(blob, kStateVersion);
-    const std::string commit = SLUA_RUNTIME_COMMIT;
-    put16(blob, (uint16_t)commit.size());
-    blob += commit;
+    const std::string& stamp = stampText();
+    put16(blob, (uint16_t)stamp.size());
+    blob += stamp;
     put64(blob, s->vm->fnHash);
     blob += payload;
 
@@ -1196,9 +1206,9 @@ SLUA_API int32_t slua_restore(slua_script* s, const uint8_t* data, size_t len)
     std::memcpy(&hash, data + pos, 8);
     pos += 8;
 
-    if (commit != SLUA_RUNTIME_COMMIT)
+    if (commit != stampText())
     {
-        logWarn("shim", "saved state is from runtime %s, this build is %s: starting the script fresh", commit.c_str(), SLUA_RUNTIME_COMMIT);
+        logWarn("shim", "saved state is stamped '%s', this build is '%s': starting the script fresh", commit.c_str(), stampText().c_str());
         return s->script->loadDefaultState() ? SLUA_RESTORED_FRESH : SLUA_ERR_LOAD;
     }
     if (hash != s->vm->fnHash)

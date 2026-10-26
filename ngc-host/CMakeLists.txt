@@ -21,6 +21,14 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# The runtime part of the saved-state stamp: the pin in LL-RUNTIME-PIN, checked against the
+# parent tree here (see stamp.cmake). Configure fails if the parent tree is not the pinned one,
+# unless -DSLUA_ALLOW_UNPINNED_TREE=ON, which stamps a hash of the parent tree instead.
+option(SLUA_ALLOW_UNPINNED_TREE "Build against a parent tree that differs from LL-RUNTIME-PIN" OFF)
+include("${CMAKE_CURRENT_LIST_DIR}/stamp.cmake")
+slua_runtime_stamp("${LL_ROOT}" "${CMAKE_CURRENT_LIST_DIR}/LL-RUNTIME-PIN" "${SLUA_ALLOW_UNPINNED_TREE}" SLUA_RUNTIME_STAMP)
+message(STATUS "Saved-state runtime stamp: ${SLUA_RUNTIME_STAMP}")
+
 ExternalProject_Add(slua
     SOURCE_DIR "${LL_ROOT}"
     BINARY_DIR "${CMAKE_BINARY_DIR}/slua"
@@ -28,6 +36,7 @@ ExternalProject_Add(slua
     CMAKE_ARGS
         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
         -DCMAKE_PROJECT_INCLUDE=${CMAKE_CURRENT_LIST_DIR}/inject_shim.cmake
+        -DSLUA_RUNTIME_STAMP=${SLUA_RUNTIME_STAMP}
         # C++ exceptions stay on (the Executor needs them) and LUAU_EXTERN_C
         # stays off, which selects the exception build of the VM, not longjmp.
         -DLUAU_EXTERN_C=OFF

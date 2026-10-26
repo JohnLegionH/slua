@@ -37,7 +37,7 @@ folder where the measurement tests append their results.
 signature, to the meaning of a result code, or to the layout of `slua_value` or
 `slua_step_result` bumps it. A host checks it before calling anything else.
 `slua_struct_size` reports the library's `sizeof` for those two structs so a host can check its
-own layout. `slua_version` returns a text form: `runtime=<SLua commit> api=<n>`.
+own layout. `slua_version` returns a text form: `runtime=<pinned SLua commit> api=<n>` (see the build stamp below).
 
 Version 3 adds two exports and changes nothing that version 2 hosts call: `slua_add_sleep` (a host
 function asks for a delay) and `slua_register_pausing_fn` (a pausing function the library binds).
@@ -174,17 +174,38 @@ Memory:
 ## Saved-state header and the fresh-start rule
 
 `slua_serialize` writes `"SLSH"`, a `u32` format version, a `u16` length and the text of the
-SLua runtime commit the library was built from, a `u64` hash of the bound host-function list
-(sorted `table.name` entries, so registration order does not matter), then the Executor's
-payload. `slua_restore` reads it into a script that has not been started:
+build stamp, a `u64` hash of the bound host-function list (sorted `table.name` entries with a
+mark for each pausing function, so registration order does not matter but a plain function and a
+pausing function of the same name differ), then the Executor's payload. `slua_restore` reads it
+into a script that has not been started:
 
 - Not our format (bad magic, truncated header, payload that cannot be read): an error
   (`SLUA_ERR_RESTORE`), and nothing is changed.
-- A different format version, a different runtime commit or a different bound function list: the
+- A different format version, a different build stamp or a different bound function list: the
   state is refused and the script starts fresh, returning `SLUA_RESTORED_FRESH`. The reason is
   logged at warning level. The saved state is never half-applied.
 - A state that matches but fails inside the Executor's restore: the script starts fresh and
   `SLUA_RESTORED_FRESH` is returned.
+
+### The build stamp
+
+The stamp text is `runtime=<runtime> api=<n>`, the same text `slua_version` returns. It has no
+part that depends on this repository's own commits, so committing to `ngc-host/` never makes a
+host's stored scripts start fresh.
+
+- `<runtime>` is the commit in `ngc-host/LL-RUNTIME-PIN`: the commit of the parent SLua tree the
+  library is built against. At configure time `ngc-host/stamp.cmake` compares the parent tree's
+  files (everything except `ngc-host/` and `.github/workflows/ngc-host.yml`) with the files at
+  that commit. If they differ, or the commit is not in the clone, configure fails. A build from
+  CI needs the full history for this check.
+- `cmake ... -DSLUA_ALLOW_UNPINNED_TREE=ON` lets a build go ahead with a parent tree that differs
+  from the pin. The runtime part is then `tree-<10 hex>`, a hash of the parent tree's file list
+  (path and blob id of every file), so two builds of the same parent files agree.
+- `<n>` is the C API version.
+- The bound-function hash is the separate `u64` in the header.
+
+A part that does not match, in any of the three, starts the script fresh. More parts can be
+appended to the stamp text later without changing the header layout.
 
 A host that stores saved state keeps the original asset or source beside it, because a fresh
 start needs it.

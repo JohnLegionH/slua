@@ -32,7 +32,10 @@ jobs:
       DOTNET_NOLOGO: '1'
       DOTNET_CLI_TELEMETRY_OPTOUT: '1'
     steps:
+      # Full history: the configure step compares the parent tree with the commit in ngc-host/LL-RUNTIME-PIN.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-dotnet@v4
         with:
