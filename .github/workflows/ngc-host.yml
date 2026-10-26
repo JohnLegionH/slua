@@ -1,16 +1,32 @@
 # Copyright (c) 2026 Legion Builds
 # Licensed under the MIT License; see LICENSE.txt in the repository root.
 #
-# Builds and tests the ngc-host native library on Windows x64 and Linux x64 for every
-# push to the branch ngc or a branch named ngc-host/..., and uploads the library with its notices. A third job
-# packs the NuGet package from the two libraries of the same run and uploads it.
+# Builds and tests the ngc-host native library on Windows x64 and Linux x64 for every push to the
+# branch ngc or to a branch named ngc-host/..., and uploads each library with its notices.
+#
+# Releases come only from here. A tag vX.Y.Z pushed on ngc makes the release job publish a GitHub
+# release whose files are the release bundle built from the two libraries of the same run. A manual
+# run with dry_run builds the same bundle and uploads it as an artifact without publishing anything.
 # Ubuntu 22.04 is used on purpose: a library built there loads on newer distributions.
 name: ngc-host
 
 on:
   push:
     branches:
+      - ngc
       - 'ngc-host/**'
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build the release bundle and keep it as an artifact; publish nothing'
+        type: boolean
+        default: true
+      version:
+        description: 'Version for the bundle file names (a tag push uses the tag)'
+        type: string
+        default: '0.1.0-dev'
 
 permissions:
   contents: read
@@ -75,20 +91,37 @@ jobs:
           path: ${{ runner.temp }}/package
           if-no-files-found: error
 
-  pack:
-    name: pack
+  # Only for a version tag or a manual run. The bundle is assembled from the two build jobs above.
+  bundle:
+    name: bundle
     needs: build-and-test
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     timeout-minutes: 30
-    env:
-      DOTNET_NOLOGO: '1'
-      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.0.x'
+          fetch-depth: 0
+
+      - name: Decide the version
+        id: version
+        shell: bash
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            version="${GITHUB_REF_NAME#v}"
+            # A release is made from a tag on ngc and from nowhere else.
+            git fetch --quiet origin ngc
+            git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD || { echo "tag $GITHUB_REF_NAME is not on the branch ngc"; exit 1; }
+          else
+            [ "$DRY_RUN" = "true" ] || { echo "a release is made only by pushing a tag on ngc; run this with dry_run"; exit 1; }
+            version="$INPUT_VERSION"
+          fi
+          case "$version" in *[!0-9A-Za-z.+-]*|"") echo "bad version: $version"; exit 1;; esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "bundle version: $version"
 
       # Both platforms' libraries come from this run, each into its own folder.
       - uses: actions/download-artifact@v4
@@ -96,25 +129,43 @@ jobs:
           pattern: ngc-host-*
           path: ${{ runner.temp }}/libs
 
-      - name: Pack NGC.Luau
+      - name: Assemble the release bundle
         shell: bash
         run: |
-          ls -l "$RUNNER_TEMP"/libs/ngc-host-win-x64 "$RUNNER_TEMP"/libs/ngc-host-linux-x64
-          sh ngc-host/scripts/pack.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/libs/ngc-host-win-x64" "$RUNNER_TEMP/libs/ngc-host-linux-x64" "$RUNNER_TEMP/nupkg"
-          ls -l "$RUNNER_TEMP/nupkg"
-
-      - name: Check the package contents
-        shell: bash
-        run: |
-          pkg=$(ls "$RUNNER_TEMP"/nupkg/NGC.Luau.*.nupkg)
-          unzip -l "$pkg"
-          for entry in lib/net10.0/SluaHost.dll runtimes/win-x64/native/slua_shim.dll runtimes/linux-x64/native/libslua_shim.so THIRD-PARTY-NOTICES.txt LICENSE.txt licenses/Apache-2.0.txt; do
-            unzip -l "$pkg" | grep -q " $entry\$" || { echo "missing from the package: $entry"; exit 1; }
-          done
-          case "$pkg" in *NGC.Luau.0.1.1-dev.nupkg) ;; *) echo "unexpected package name: $pkg"; exit 1;; esac
+          ls -lR "$RUNNER_TEMP/libs"
+          python3 -I ngc-host/scripts/make-bundle.py "$GITHUB_WORKSPACE" "${{ steps.version.outputs.version }}" "$GITHUB_SHA" \
+            "$RUNNER_TEMP/libs/ngc-host-win-x64" "$RUNNER_TEMP/libs/ngc-host-linux-x64" "$RUNNER_TEMP/bundle"
+          (cd "$RUNNER_TEMP/bundle" && sha256sum -c SHA256SUMS.txt)
+          cat "$RUNNER_TEMP/bundle/RELEASE-NOTES.md"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: NGC.Luau-nupkg
-          path: ${{ runner.temp }}/nupkg/*.nupkg
+          name: slua-release-bundle
+          path: ${{ runner.temp }}/bundle
           if-no-files-found: error
+
+  # Publishes the bundle. Runs for a pushed version tag only; a manual run never gets here.
+  release:
+    name: release
+    needs: bundle
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: slua-release-bundle
+          path: ${{ runner.temp }}/bundle
+
+      - name: Publish the GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cd "$RUNNER_TEMP/bundle"
+          # The licence texts go up as single files; SHA256SUMS.txt names them licenses/<file>.
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file RELEASE-NOTES.md \
+            ./*.zip ./*.tar.gz ./slua_shim.h ./THIRD-PARTY-NOTICES.txt ./RELEASE-NOTES.md ./SHA256SUMS.txt ./licenses/*
