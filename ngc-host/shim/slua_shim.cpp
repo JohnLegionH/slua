@@ -703,6 +703,16 @@ SLUA_API int32_t slua_set_log(slua_log_fn fn)
     SLUA_CATCH
 }
 
+SLUA_API int32_t slua_set_engine_identity(const char* engine_name, const char* alt_engine_name, const char* alt_engine_header)
+{
+    return SLUA_ERR_NOT_IMPLEMENTED;
+}
+
+SLUA_API int32_t slua_engine_name(char* buf, int32_t cap)
+{
+    return SLUA_ERR_NOT_IMPLEMENTED;
+}
+
 SLUA_API int32_t slua_init(void)
 {
     SLUA_TRY

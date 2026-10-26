@@ -50,6 +50,19 @@ public enum Watchdog { Default = 0, Resident = 1, Threaded = 2 }
 /// </summary>
 public readonly record struct StepResult(StepStatus Status, int NewState, float SleepServed, FaultKind Fault, double CpuSeconds = 0, bool HandlersChanged = false);
 
+/// <summary>The native library is not the API version this host was written for.</summary>
+public sealed class ApiVersionMismatchException : InvalidOperationException
+{
+    public int LibraryVersion { get; }
+    public int RequiredVersion { get; }
+    public ApiVersionMismatchException(int library, int required)
+        : base($"The SLua native library is API version {library}; this host needs API version {required}.")
+    {
+        LibraryVersion = library;
+        RequiredVersion = required;
+    }
+}
+
 public class SluaException : Exception
 {
     public int Code { get; }
@@ -65,6 +78,32 @@ public static unsafe class Host
     public const int RetYield = -1000;
     /// <summary>Return this from a HostFn to yield the script with no values.</summary>
     public static readonly Value[] Yield = new Value[0];
+
+    /// <summary>The API version of slua_shim.h this host was written for. <see cref="Init"/> refuses a library of any other version.</summary>
+    public const int RequiredApiVersion = 3;
+
+    /// <summary>Throws <see cref="ApiVersionMismatchException"/>, naming both versions, when <paramref name="library"/> is not <see cref="RequiredApiVersion"/>.</summary>
+    internal static void VerifyApiVersion(int library)
+    {
+    }
+
+    /// <summary>Init, with the library's API version supplied by the caller instead of read from the library.</summary>
+    internal static void InitWith(Func<int> libraryApiVersion)
+    {
+        Init();
+    }
+
+    /// <summary>
+    /// Names the engine for the library's refusal and error text. <paramref name="engineName"/> is this engine;
+    /// the other two name the engine that runs LSL scripts using os*, iw* or bot* functions and the script header
+    /// that selects it. The library has no built-in names; null or empty leaves a name out. Call before compiling.
+    /// </summary>
+    public static void SetEngineIdentity(string? engineName, string? altEngineName = null, string? altEngineHeader = null)
+    {
+    }
+
+    /// <summary>The engine name the library holds (empty when none was set).</summary>
+    public static string EngineName => "";
 
     internal const int Ok = 0;
     internal const int RestoredFresh = 1;

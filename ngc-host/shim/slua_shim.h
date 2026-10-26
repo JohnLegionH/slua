@@ -152,6 +152,15 @@ SLUA_API int32_t slua_api_version(void);
 // sizeof of a struct as the library sees it, so a host can check its own layout.
 SLUA_API int32_t slua_struct_size(int32_t which);
 SLUA_API int32_t slua_set_log(slua_log_fn fn);
+// Names the engine the library runs for (API 4), supplied by the host at start-up and used in the
+// library's refusal and error text. engine_name is this engine's name. alt_engine_name and
+// alt_engine_header name the engine that runs LSL scripts calling os*, iw* or bot* functions and
+// the script header that selects it; the compile refusal (SLUA_ERR_UNSUPPORTED_FUNCTION) points
+// there. Any of them may be NULL or empty, and the text then says less. The library has no
+// built-in names. Call it before the first slua_compile; the strings are copied.
+SLUA_API int32_t slua_set_engine_identity(const char* engine_name, const char* alt_engine_name, const char* alt_engine_header);
+// Copies the engine name set by slua_set_engine_identity (empty when none) into buf, cut to cap-1 bytes.
+SLUA_API int32_t slua_engine_name(char* buf, int32_t cap);
 SLUA_API int32_t slua_init(void);
 
 // Compiles source to an asset (header plus bytecode). *out and *err are
