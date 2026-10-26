@@ -108,6 +108,32 @@ public class NativePackageTests
         Assert.Contains(Version, notes);
     }
 
+    // The bundle as the release page holds it: every file a bundle contains is one asset, all in one
+    // flat folder (a release has no folders), and a plain download is checked with sha256sum -c.
+    [Fact]
+    public void C2_TheChecksumsHoldOverTheFilesAsTheyAreDownloadedFromTheReleasePage()
+    {
+        string bundle = MakeBundle();
+        string flat = Path.Combine(work, "release-page");
+        Directory.CreateDirectory(flat);
+        foreach (var f in Directory.GetFiles(bundle, "*", SearchOption.AllDirectories))
+        {
+            string dest = Path.Combine(flat, Path.GetFileName(f));
+            Assert.False(File.Exists(dest), "two bundle files would have the same name on the release page: " + Path.GetFileName(f));
+            File.Copy(f, dest);
+        }
+
+        var (code, o) = Run("sha256sum", flat, "-c", "SHA256SUMS.txt");
+        Assert.True(code == 0, "sha256sum -c over the flat folder failed: " + o);
+
+        // Nothing is listed twice or left unlisted: the list names exactly the other files.
+        var listed = File.ReadAllLines(Path.Combine(flat, "SHA256SUMS.txt")).Where(l => l.Length > 0)
+            .Select(l => l.Split("  ", 2)[1].TrimStart('*')).OrderBy(n => n, StringComparer.Ordinal).ToList();
+        var present = Directory.GetFiles(flat).Select(Path.GetFileName).Where(n => n != "SHA256SUMS.txt")
+            .OrderBy(n => n, StringComparer.Ordinal).ToList();
+        Assert.Equal(present, listed);
+    }
+
     [Fact]
     public void C1_TheBundleIsRefusedWhenALibraryDoesNotCarryThePin()
     {
