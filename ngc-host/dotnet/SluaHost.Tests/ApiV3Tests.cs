@@ -85,4 +85,172 @@ public class ApiV3Tests
     [Fact]
     public void V3_VersionTextCarriesTheApiVersion() => Assert.Contains("api=3", Host.Version());
 
+    // ---- A: a host function asks for a delay ----
+
+    [Fact]
+    public void A1_SLuaHostFunctionDelayIsReportedToTheScheduler()
+    {
+        using var rig = new Rig(pausing: false);
+        using var s = rig.Run("""
+            ossl.Report("a")
+            ossl.Slow(0.25)
+            ossl.Report("b")
+            ossl.Slow(0.5)
+            ossl.Report("c")
+            """);
+        var (sleep, last) = Drain(s);
+        Assert.Equal(StepStatus.Ok, last.Status);
+        Assert.Equal(0.75f, sleep, 3);
+        Assert.Equal(new[] { "str:a", "str:b", "str:c" }, rig.Kit.Snapshot());
+    }
+
+    [Fact]
+    public void A1_LslHostFunctionDelayIsReportedToTheScheduler()
+    {
+        using var rig = new Rig(pausing: false);
+        using var s = rig.Run("""
+            default {
+                state_entry() {
+                    llSay(0, "one");
+                    llSay(0, "two");
+                    llOwnerSay("done");
+                }
+            }
+            """, lsl: true);
+        var (sleep, last) = Drain(s);
+        Assert.Equal(StepStatus.Ok, last.Status);
+        Assert.Equal(0.4f, sleep, 3);
+        Assert.Equal(new[] { "Say int:0 str:one", "Say int:0 str:two", "OwnerSay str:done" }, rig.Kit.Snapshot());
+    }
+
+    [Fact]
+    public void A1_AScriptThatAskedForADelayIsPausedBeforeItRunsOn()
+    {
+        using var rig = new Rig(pausing: false);
+        using var s = rig.Run("""
+            ossl.Slow(0.25)
+            coroutine.yield()
+            ossl.Report("after")
+            """);
+        var first = s.Step();
+        Assert.Equal(StepStatus.Preempted, first.Status);
+        Assert.Equal(0f, first.SleepServed);
+        var second = s.Step();
+        Assert.Equal(0.25f, second.SleepServed, 3);
+    }
+
+    [Fact]
+    public void A1_AddSleepOutsideAHostCallIsRefused()
+    {
+        using var rig = new Rig(pausing: false);
+        using var s = rig.Run("ossl.Report('x')");
+        var e = Assert.Throws<SluaException>(() => s.AddSleep(1.0));
+        Assert.Equal(-8, e.Code);
+    }
+
+    [Fact]
+    public void A1_AddSleepRefusesValuesThatAreNotADelay()
+    {
+        using var rig = new Rig(pausing: false);
+        var codes = new List<int>();
+        rig.Vm.Register("ossl", "TryBad", (tag, a) =>
+        {
+            foreach (double bad in new[] { 0.0, -1.0, double.NaN, double.PositiveInfinity, double.MaxValue })
+            {
+                try { rig.Scripts[tag].AddSleep(bad); codes.Add(0); }
+                catch (SluaException e) { codes.Add(e.Code); }
+            }
+            return null;
+        });
+        using var s = rig.Run("ossl.TryBad()");
+        var (sleep, last) = Drain(s);
+        Assert.Equal(StepStatus.Ok, last.Status);
+        Assert.Equal(new[] { -3, -3, -3, -3, -3 }, codes);
+        Assert.Equal(0f, sleep);
+    }
+
+    [Fact]
+    public void A1_AScriptCannotBeGivenADelayFromAnotherScriptsCall()
+    {
+        using var rig = new Rig(pausing: false);
+        int code = 0;
+        rig.Vm.Register("ossl", "DelayTheOther", (tag, a) =>
+        {
+            try { rig.Scripts[2].AddSleep(1.0); }
+            catch (SluaException e) { code = e.Code; }
+            return null;
+        });
+        using var other = rig.Run("ossl.Report('other')", tag: 2);
+        using var caller = rig.Run("ossl.DelayTheOther()", tag: 1);
+        Drain(caller);
+        Assert.Equal(-8, code);
+        Assert.Equal(0f, Drain(other).Sleep);
+    }
+
+    [Fact]
+    public void A1_ADelayedSLuaCallSurvivesSaveAndRestore()
+    {
+        const string source = """
+            ossl.Report("before")
+            ossl.Slow(0.25)
+            coroutine.yield()
+            ossl.Report("after")
+            """;
+        byte[] state;
+        using (var rig = new Rig(pausing: false))
+        {
+            using var s = rig.Run(source);
+            Assert.Equal(StepStatus.Preempted, s.Step().Status);
+            Assert.Equal(new[] { "str:before" }, rig.Kit.Snapshot());
+            state = s.Serialize();
+        }
+        using (var rig2 = new Rig(pausing: false))
+        {
+            using var s2 = rig2.Fresh(Host.Compile(source, false));
+            Assert.True(s2.Restore(state));
+            var first = s2.Step();
+            Assert.Equal(0.25f, first.SleepServed, 3);
+            var (_, last) = Drain(s2);
+            Assert.Equal(StepStatus.Ok, last.Status);
+            Assert.Equal(new[] { "str:after" }, rig2.Kit.Snapshot());
+        }
+    }
+
+    [Fact]
+    public void A1_ADelayedLslCallSurvivesSaveAndRestore()
+    {
+        const string source = """
+            default {
+                state_entry() {
+                    llOwnerSay("before");
+                    llSay(0, "delayed");
+                    llOwnerSay("after");
+                }
+            }
+            """;
+        byte[] state;
+        string[] linesBefore;
+        using (var rig = new Rig(pausing: false))
+        {
+            using var s = rig.Run(source, lsl: true);
+            // One step is long enough for the handler to reach the delayed call; the delay is pending and not yet served.
+            var first = s.Step(0.05);
+            Assert.Equal(0f, first.SleepServed);
+            linesBefore = rig.Kit.Snapshot();
+            Assert.Contains("Say int:0 str:delayed", linesBefore);
+            state = s.Serialize();
+        }
+        using (var rig2 = new Rig(pausing: false))
+        {
+            using var s2 = rig2.Fresh(Host.Compile(source, true));
+            Assert.True(s2.Restore(state));
+            var (sleep, _) = Drain(s2);
+            Assert.Equal(0.2f, sleep, 3);
+            // Whatever ran before the save does not run again; every line appears exactly once.
+            Assert.Equal(
+                new[] { "OwnerSay str:before", "Say int:0 str:delayed", "OwnerSay str:after" },
+                linesBefore.Concat(rig2.Kit.Snapshot()).ToArray());
+        }
+    }
+
 }
