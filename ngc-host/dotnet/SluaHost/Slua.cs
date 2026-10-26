@@ -43,7 +43,12 @@ public enum StepStatus { Ok = 0, Preempted = 1, StateChange = 2, Fault = 3, NotR
 public enum FaultKind { None = 0, Runtime = 1, OutOfMemory = 2, Timeout = 3, UnexpectedYield = 4, Unknown = 255 }
 public enum Watchdog { Default = 0, Resident = 1, Threaded = 2 }
 
-public readonly record struct StepResult(StepStatus Status, int NewState, float SleepServed, FaultKind Fault);
+/// <summary>
+/// What one step or dispatch did. <see cref="SleepServed"/> is the delay the script asked for in this step.
+/// <see cref="CpuSeconds"/> is the CPU time the calling thread used while the script ran (0 for a step that ran
+/// nothing). <see cref="HandlersChanged"/> is true when the script's handler mask changed during the step.
+/// </summary>
+public readonly record struct StepResult(StepStatus Status, int NewState, float SleepServed, FaultKind Fault, double CpuSeconds = 0, bool HandlersChanged = false);
 
 public class SluaException : Exception
 {
@@ -305,7 +310,7 @@ public sealed unsafe class Script : IDisposable
     {
         Native.StepResultN r;
         Host.Check("slua_step", Native.slua_step(_h, quantaSeconds, &r));
-        return new((StepStatus)r.Status, r.NewState, r.SleepServed, (FaultKind)r.FaultKind);
+        return new((StepStatus)r.Status, r.NewState, r.SleepServed, (FaultKind)r.FaultKind, r.CpuSeconds, r.HandlersChanged != 0);
     }
 
     /// <summary>Steps until the script has nothing left to run, a fault, or maxSteps steps. Returns the last status that was not Idle.</summary>
@@ -334,7 +339,7 @@ public sealed unsafe class Script : IDisposable
         for (int i = 0; i < args.Length; i++) Native.FromManaged(args[i], &native[i], arena);
         Native.StepResultN r;
         Host.Check("slua_dispatch_event", Native.slua_dispatch_event(_h, eventIndex, native, args.Length, quantaSeconds, &r));
-        return new((StepStatus)r.Status, r.NewState, r.SleepServed, (FaultKind)r.FaultKind);
+        return new((StepStatus)r.Status, r.NewState, r.SleepServed, (FaultKind)r.FaultKind, r.CpuSeconds, r.HandlersChanged != 0);
     }
 
     public StepResult Dispatch(string eventName, ReadOnlySpan<Value> args, double quantaSeconds = 0.01) =>

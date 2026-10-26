@@ -134,6 +134,12 @@ struct slua_step_result
     int32_t new_state;  // LSL state number when status is STATE_CHANGE
     float sleep_served; // seconds of delay the script asked for in this step (API 4), consumed by the shim
     int32_t fault_kind; // SLUA_FAULT_*
+    // CPU time the calling thread used while the script ran in this step (API 4); see slua_step.
+    double cpu_seconds;
+    // 1 when the script's handler mask or its known flag changed during this step (API 4); see
+    // slua_handler_mask.
+    int32_t handlers_changed;
+    int32_t reserved; // zero
 };
 
 // Which struct to measure in slua_struct_size.

@@ -28,6 +28,9 @@ internal static unsafe class Native
         public int NewState;
         public float SleepServed;
         public int FaultKind;
+        public double CpuSeconds;
+        public int HandlersChanged;
+        public int Reserved;
     }
 
     internal static Value ToManaged(in SluaValue v) => (ValueType)v.Type switch
