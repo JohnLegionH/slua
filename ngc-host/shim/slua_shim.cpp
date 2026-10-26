@@ -194,10 +194,11 @@ uint64_t hashFunctionList(const std::vector<HostFnRec>& fns)
 
 // Text and element arrays made while reading one call's arguments. Deques keep
 // the addresses of earlier entries stable as later ones are added.
+// Made only when a call carries a key or a list, so plain calls pay nothing.
 struct ReadScratch
 {
-    std::deque<std::string> texts;
-    std::deque<std::vector<slua_value>> lists;
+    std::unique_ptr<std::deque<std::string>> texts;
+    std::unique_ptr<std::deque<std::vector<slua_value>>> lists;
 };
 
 // Reads the Lua value at idx into v. Strings point into the Lua string, which
@@ -258,11 +259,13 @@ void readValue(lua_State* L, int idx, slua_value& v, ReadScratch& scratch, bool 
             size_t len = 0;
             luaL_checkstack(L, 2, "key");
             const char* text = luaL_tolstring(L, idx, &len);
-            scratch.texts.emplace_back(text, len);
+            if (!scratch.texts)
+                scratch.texts = std::make_unique<std::deque<std::string>>();
+            scratch.texts->emplace_back(text, len);
             lua_pop(L, 1);
             v.type = SLUA_T_KEY;
-            v.s = scratch.texts.back().c_str();
-            v.len = (int32_t)scratch.texts.back().size();
+            v.s = scratch.texts->back().c_str();
+            v.len = (int32_t)scratch.texts->back().size();
             break;
         }
         luaL_errorL(L, "unsupported type %s", luaL_typename(L, idx));
@@ -276,8 +279,10 @@ void readValue(lua_State* L, int idx, slua_value& v, ReadScratch& scratch, bool 
         if (n > SLUA_MAX_LIST_ITEMS)
             luaL_errorL(L, "list has too many elements (%d)", n);
         luaL_checkstack(L, 3, "list");
-        scratch.lists.emplace_back((size_t)n);
-        std::vector<slua_value>& items = scratch.lists.back();
+        if (!scratch.lists)
+            scratch.lists = std::make_unique<std::deque<std::vector<slua_value>>>();
+        scratch.lists->emplace_back((size_t)n);
+        std::vector<slua_value>& items = scratch.lists->back();
         const int abs = lua_absindex(L, idx);
         for (int k = 0; k < n; ++k)
         {
