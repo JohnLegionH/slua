@@ -146,9 +146,10 @@ public class ApiV3Tests
             """);
         var first = s.Step();
         Assert.Equal(StepStatus.Preempted, first.Status);
-        Assert.Equal(0f, first.SleepServed);
+        // API 4: the step that yields for the delay reports it.
+        Assert.Equal(0.25f, first.SleepServed, 3);
         var second = s.Step();
-        Assert.Equal(0.25f, second.SleepServed, 3);
+        Assert.Equal(0f, second.SleepServed);
     }
 
     [Fact]
@@ -212,7 +213,10 @@ public class ApiV3Tests
         using (var rig = new Rig(pausing: false))
         {
             using var s = rig.Run(source);
-            Assert.Equal(StepStatus.Preempted, s.Step().Status);
+            var served = s.Step();
+            Assert.Equal(StepStatus.Preempted, served.Status);
+            // API 4: the delay was handed to the host by that step, so the saved script owes none.
+            Assert.Equal(0.25f, served.SleepServed, 3);
             Assert.Equal(new[] { "str:before" }, rig.Kit.Snapshot());
             state = s.Serialize();
         }
@@ -221,7 +225,7 @@ public class ApiV3Tests
             using var s2 = rig2.Fresh(Host.Compile(source, false));
             Assert.True(s2.Restore(state));
             var first = s2.Step();
-            Assert.Equal(0.25f, first.SleepServed, 3);
+            Assert.Equal(0f, first.SleepServed);
             var (_, last) = Drain(s2);
             Assert.Equal(StepStatus.Ok, last.Status);
             Assert.Equal(new[] { "str:after" }, rig2.Kit.Snapshot());
@@ -245,9 +249,9 @@ public class ApiV3Tests
         using (var rig = new Rig(pausing: false))
         {
             using var s = rig.Run(source, lsl: true);
-            // Stop at the step that reaches the delayed call: the delay is pending and not yet served.
+            // Stop at the step that reaches the delayed call: API 4 reports the delay in that step.
             var first = StepUntil(s, () => rig.Kit.Snapshot().Contains("Say int:0 str:delayed"));
-            Assert.Equal(0f, first.SleepServed);
+            Assert.Equal(0.2f, first.SleepServed, 3);
             linesBefore = rig.Kit.Snapshot();
             Assert.Contains("Say int:0 str:delayed", linesBefore);
             state = s.Serialize();
@@ -257,7 +261,7 @@ public class ApiV3Tests
             using var s2 = rig2.Fresh(Host.Compile(source, true));
             Assert.True(s2.Restore(state));
             var (sleep, _) = Drain(s2);
-            Assert.Equal(0.2f, sleep, 3);
+            Assert.Equal(0f, sleep);
             // Whatever ran before the save does not run again; every line appears exactly once.
             Assert.Equal(
                 new[] { "OwnerSay str:before", "Say int:0 str:delayed", "OwnerSay str:after" },
