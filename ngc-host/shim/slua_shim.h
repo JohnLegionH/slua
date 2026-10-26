@@ -132,7 +132,7 @@ struct slua_step_result
 {
     int32_t status;     // SLUA_STEP_*
     int32_t new_state;  // LSL state number when status is STATE_CHANGE
-    float sleep_served; // seconds of sleep the engine asked for in this step, consumed by the shim
+    float sleep_served; // seconds of delay the script asked for in this step (API 4), consumed by the shim
     int32_t fault_kind; // SLUA_FAULT_*
 };
 
@@ -205,9 +205,14 @@ SLUA_API int32_t slua_dispatch_event(slua_script* s, int32_t event, const slua_v
 // The interval an SLua script last asked for with LLTimers, in seconds; 0 when it has no timer.
 // The host schedules a "timer" event dispatch for that time. Not meaningful for LSL.
 SLUA_API int32_t slua_timer_interval(slua_script* s, double* seconds);
-// Adds seconds to the sleep the script is asked to serve; the next step reports it in
-// sleep_served. Valid only inside a host function that this script called (otherwise
-// SLUA_ERR_STATE); seconds must be finite and above zero (otherwise SLUA_ERR_BAD_ARG). Calls add up.
+// Adds seconds to the delay the script owes. The step that is running reports it in sleep_served
+// when it returns (API 4; earlier versions reported it one step late). If the host function
+// that asked for the delay returns no values, the script also yields when the function returns,
+// as llSleep ends a script's turn in Second Life; the result of that step is SLUA_STEP_PREEMPTED.
+// A function that returns values keeps them and does not yield by itself; its delay takes effect
+// at the script's next interrupt. Valid only inside a host function that this script called
+// (otherwise SLUA_ERR_STATE); seconds must be finite and above zero (otherwise SLUA_ERR_BAD_ARG).
+// Calls add up.
 SLUA_API int32_t slua_add_sleep(slua_script* s, double seconds);
 SLUA_API int32_t slua_kill(slua_script* s);
 

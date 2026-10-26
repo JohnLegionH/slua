@@ -168,6 +168,8 @@ struct slua_script : LiveCounted<slua_script>
     double timerInterval = 0.0;
     // Host functions of this script that are running now; slua_add_sleep is valid only while this is above zero.
     std::atomic<int> hostCallDepth{0};
+    // Set by slua_add_sleep, cleared when a host function starts; tells the call's end that it asked for a delay.
+    std::atomic<bool> delayAddedInCall{false};
 };
 
 namespace
@@ -449,6 +451,8 @@ int runHost(lua_State* L, int index, bool resumed)
     slua_value rets[kMaxHostRets];
     std::memset(rets, 0, sizeof(rets));
     int32_t n;
+    if (owner)
+        owner->delayAddedInCall.store(false);
     {
         HostCallScope inCall(owner);
         n = fn.cb(fn.user, fn.id, tag, args, nargs, rets, kMaxHostRets);
@@ -459,6 +463,13 @@ int runHost(lua_State* L, int index, bool resumed)
     if (fn.kind == HostFnKind::PausingStart && n >= 0)
         return lua_yield(L, 0); // the start call's values are not the call's results; the script waits
     if (n == SLUA_RET_YIELD)
+        return lua_yield(L, 0);
+    // A call that asked for a delay and gives back nothing ends the script's turn, as llSleep does in
+    // Second Life: the script is held for the delay anyway, and the host is told in this step's result.
+    // A call that gives values back cannot yield here without losing them, so the delay takes effect
+    // at the script's next interrupt instead. Where the script cannot yield (inside a sort comparator,
+    // for instance) the same applies.
+    if (n == 0 && fn.kind == HostFnKind::Plain && owner && owner->delayAddedInCall.load() && lua_isyieldable(L))
         return lua_yield(L, 0);
     if (n < 0)
     {
@@ -894,6 +905,7 @@ SLUA_API int32_t slua_add_sleep(slua_script* s, double seconds)
     if (!std::isfinite(total))
         return SLUA_ERR_BAD_ARG;
     s->script->setSleep(total);
+    s->delayAddedInCall.store(true);
     return SLUA_OK;
     SLUA_CATCH
 }
@@ -1042,6 +1054,22 @@ SLUA_API int32_t slua_script_start(slua_script* s)
     SLUA_CATCH
 }
 
+namespace
+{
+
+// The delay the script is owed, which the step reports to the host and clears. A step takes it
+// twice: at the start, for a delay that was saved with the script, and at the end, for a delay the
+// script's own run asked for (a host function, or the runtime's punishment for a long run).
+float takeSleep(Script& script)
+{
+    const float sleep = script.getSleep();
+    if (sleep > 0.0f)
+        script.setSleep(0.0f);
+    return sleep > 0.0f ? sleep : 0.0f;
+}
+
+} // namespace
+
 SLUA_API int32_t slua_step(slua_script* s, double quanta_seconds, slua_step_result* result)
 {
     SLUA_TRY
@@ -1065,11 +1093,7 @@ SLUA_API int32_t slua_step(slua_script* s, double quanta_seconds, slua_step_resu
     // The engine asks for sleeps (ll.Sleep, punishment for long runs). A real
     // scheduler would delay the next step; the spike serves them at once and
     // reports how long they were.
-    if (script.getSleep() > 0.0f)
-    {
-        result->sleep_served = script.getSleep();
-        script.setSleep(0.0f);
-    }
+    result->sleep_served = takeSleep(script);
 
     RunResult rr;
     for (;;)
@@ -1106,6 +1130,7 @@ SLUA_API int32_t slua_step(slua_script* s, double quanta_seconds, slua_step_resu
     result->status = (int32_t)rr.status;
     result->new_state = rr.newState;
     result->fault_kind = (int32_t)script.getFaultKind();
+    result->sleep_served += takeSleep(script);
     return SLUA_OK;
     SLUA_CATCH
 }
@@ -1170,11 +1195,7 @@ SLUA_API int32_t slua_dispatch_event(slua_script* s, int32_t event, const slua_v
         return SLUA_ERR_STATE;
 
     // Same sleep handling as slua_step.
-    if (script.getSleep() > 0.0f)
-    {
-        result->sleep_served = script.getSleep();
-        script.setSleep(0.0f);
-    }
+    result->sleep_served = takeSleep(script);
 
     // A script that is known not to handle the event is not run at all.
     if (script.eventHandlersKnown() && !(script.getEventHandlers() & Luau::lslEventBit(event)))
@@ -1192,6 +1213,7 @@ SLUA_API int32_t slua_dispatch_event(slua_script* s, int32_t event, const slua_v
     result->status = (int32_t)rr.status;
     result->new_state = rr.newState;
     result->fault_kind = (int32_t)script.getFaultKind();
+    result->sleep_served += takeSleep(script);
     return SLUA_OK;
     SLUA_CATCH
 }
