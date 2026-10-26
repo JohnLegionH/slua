@@ -688,6 +688,18 @@ SLUA_API int32_t slua_watchdog_stats(slua_vm* vm, uint64_t* fires, uint64_t* lat
     SLUA_CATCH
 }
 
+SLUA_API int32_t slua_register_pausing_fn(slua_vm* vm, const char* table, const char* name, int32_t start_id, int32_t take_id, slua_host_fn cb, void* user)
+{
+    (void)vm; (void)table; (void)name; (void)start_id; (void)take_id; (void)cb; (void)user;
+    return SLUA_ERR_NOT_IMPLEMENTED;
+}
+
+SLUA_API int32_t slua_add_sleep(slua_script* s, double seconds)
+{
+    (void)s; (void)seconds;
+    return SLUA_ERR_NOT_IMPLEMENTED;
+}
+
 SLUA_API int32_t slua_image_new(slua_vm* vm, const uint8_t* asset, size_t len, slua_image** out)
 {
     SLUA_TRY

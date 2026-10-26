@@ -146,6 +146,15 @@ SLUA_API int32_t slua_vm_free(slua_vm* vm);
 // Host functions must be registered before the first script is created.
 SLUA_API int32_t slua_register_host_fn(slua_vm* vm, const char* table, const char* name, int32_t fn_id, slua_host_fn cb, void* user);
 SLUA_API int32_t slua_watchdog_stats(slua_vm* vm, uint64_t* fires, uint64_t* late_fires);
+// Registers table.name as a pausing function. A script calling it runs a wrapper the library
+// builds: it calls cb with start_id and the call's arguments (return values are ignored), yields
+// the script, and after the host steps the script again calls cb with take_id and no arguments;
+// the values that call returns are the values of table.name(...). A negative return from either
+// call raises a script error as for any host function; SLUA_RET_YIELD from either is an error,
+// because the wrapper does the yielding. The wrapper exists in the environment for SLua and for
+// LSL, so LSL compiled by the runtime's compiler calls it as it calls any ll function. Same
+// registration rule as slua_register_host_fn: before the first image is made.
+SLUA_API int32_t slua_register_pausing_fn(slua_vm* vm, const char* table, const char* name, int32_t start_id, int32_t take_id, slua_host_fn cb, void* user);
 
 // Loads an asset into an image that any number of scripts in this VM can share.
 // The image is released with slua_image_free; scripts made from it keep it alive.
@@ -172,6 +181,10 @@ SLUA_API int32_t slua_dispatch_event(slua_script* s, int32_t event, const slua_v
 // The interval an SLua script last asked for with LLTimers, in seconds; 0 when it has no timer.
 // The host schedules a "timer" event dispatch for that time. Not meaningful for LSL.
 SLUA_API int32_t slua_timer_interval(slua_script* s, double* seconds);
+// Adds seconds to the sleep the script is asked to serve; the next step reports it in
+// sleep_served. Valid only inside a host function that this script called (otherwise
+// SLUA_ERR_STATE); seconds must be finite and above zero (otherwise SLUA_ERR_BAD_ARG). Calls add up.
+SLUA_API int32_t slua_add_sleep(slua_script* s, double seconds);
 SLUA_API int32_t slua_kill(slua_script* s);
 
 SLUA_API int32_t slua_serialize(slua_script* s, uint8_t** out, size_t* out_len);

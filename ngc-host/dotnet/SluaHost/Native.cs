@@ -91,6 +91,9 @@ internal static unsafe class Native
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_vm_free(IntPtr vm);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int slua_register_host_fn(IntPtr vm, [MarshalAs(UnmanagedType.LPUTF8Str)] string table, [MarshalAs(UnmanagedType.LPUTF8Str)] string name, int fnId, delegate* unmanaged[Cdecl]<void*, int, long, SluaValue*, int, SluaValue*, int, int> cb, void* user);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int slua_register_pausing_fn(IntPtr vm, [MarshalAs(UnmanagedType.LPUTF8Str)] string table, [MarshalAs(UnmanagedType.LPUTF8Str)] string name, int startId, int takeId, delegate* unmanaged[Cdecl]<void*, int, long, SluaValue*, int, SluaValue*, int, int> cb, void* user);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_add_sleep(IntPtr s, double seconds);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_watchdog_stats(IntPtr vm, ulong* fires, ulong* late);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_script_new(IntPtr vm, byte* asset, nuint len, int memLimit, long tag, IntPtr* o);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_script_free(IntPtr s);

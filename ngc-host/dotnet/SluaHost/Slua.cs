@@ -166,6 +166,21 @@ public sealed unsafe class Vm : IDisposable
             Native.slua_register_host_fn(Handle, table, name, id, &HostEntry.Call, (void*)GCHandle.ToIntPtr(_self)));
     }
 
+    /// <summary>
+    /// Registers table.name as a pausing function. A script's call runs <paramref name="start"/> with the call's
+    /// arguments, then yields; after the host steps the script again, <paramref name="take"/> runs with no
+    /// arguments and its return values are the call's results. Throwing from either raises a script error.
+    /// </summary>
+    public void RegisterPausing(string table, string name, HostFn start, HostFn take)
+    {
+        int startId = _fns.Count;
+        _fns.Add(start);
+        int takeId = _fns.Count;
+        _fns.Add(take);
+        Host.Check($"slua_register_pausing_fn({table}.{name})",
+            Native.slua_register_pausing_fn(Handle, table, name, startId, takeId, &HostEntry.Call, (void*)GCHandle.ToIntPtr(_self)));
+    }
+
     public Script NewScript(byte[] asset, int memoryLimit = 128 * 1024, long tag = 0)
     {
         IntPtr s;
@@ -326,6 +341,12 @@ public sealed unsafe class Script : IDisposable
             return seconds;
         }
     }
+
+    /// <summary>
+    /// Adds a delay to this script: the next step reports it in <see cref="StepResult.SleepServed"/>. Only valid
+    /// inside a host function this script called (throws SluaException with code -8 otherwise).
+    /// </summary>
+    public void AddSleep(double seconds) => Host.Check("slua_add_sleep", Native.slua_add_sleep(_h, seconds));
 
     public void Kill() => Host.Check("slua_kill", Native.slua_kill(_h));
 
