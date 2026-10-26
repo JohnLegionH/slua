@@ -59,7 +59,7 @@ public class NativePackageTests
         return d;
     }
 
-    string MakeBundle(string winText = "stand-in win library runtime=PIN api=3", string linuxText = "stand-in linux library runtime=PIN api=3")
+    string MakeBundle(string winText = "stand-in win library PIN", string linuxText = "stand-in linux library PIN")
     {
         string win = BuildOutput("win", "slua_shim.dll", winText.Replace("PIN", Pin));
         string linux = BuildOutput("linux", "libslua_shim.so", linuxText.Replace("PIN", Pin));
@@ -111,8 +111,8 @@ public class NativePackageTests
     [Fact]
     public void C1_TheBundleIsRefusedWhenALibraryDoesNotCarryThePin()
     {
-        string win = BuildOutput("win", "slua_shim.dll", "stand-in win library runtime=" + Pin);
-        string linux = BuildOutput("linux", "libslua_shim.so", "stand-in linux library runtime=0000000000");
+        string win = BuildOutput("win", "slua_shim.dll", "stand-in win library " + Pin);
+        string linux = BuildOutput("linux", "libslua_shim.so", "stand-in linux library 0000000000");
         string bundle = Path.Combine(work, "bundle");
         var (code, o) = Run(Python(), RepoRoot, "-I", Path.Combine(RepoRoot, "ngc-host", "scripts", "make-bundle.py"),
             RepoRoot, Version, Commit, win, linux, bundle);

@@ -48,8 +48,9 @@ def main(argv):
         path = os.path.join(folder, name)
         if not os.path.isfile(path):
             fail("%s not found in %s" % (name, folder))
-        if ("runtime=" + pin).encode() not in read(path):
-            fail("%s does not carry runtime=%s from ngc-host/LL-RUNTIME-PIN; it was not built from the pinned runtime" % (name, pin))
+        # The library holds the pin as a string constant (the stamp text is put together at run time).
+        if pin.encode() not in read(path):
+            fail("%s does not carry the runtime commit %s from ngc-host/LL-RUNTIME-PIN; it was not built from the pinned runtime" % (name, pin))
 
     # Notices, licences and header come from the Linux build; the Windows build must agree.
     shared = ["slua_shim.h", "THIRD-PARTY-NOTICES.txt"] + sorted(

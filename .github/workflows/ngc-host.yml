@@ -49,6 +49,11 @@ jobs:
       DOTNET_NOLOGO: '1'
       DOTNET_CLI_TELEMETRY_OPTOUT: '1'
     steps:
+      # Files are checked out with LF on Windows too, so the notices in the release are the repository's bytes.
+      - name: Keep line endings
+        shell: bash
+        run: git config --global core.autocrlf false
+
       # Full history: the configure step compares the parent tree with the commit in ngc-host/LL-RUNTIME-PIN.
       - uses: actions/checkout@v4
         with:
