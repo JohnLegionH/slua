@@ -55,11 +55,11 @@ jobs:
         run: git config --global core.autocrlf false
 
       # Full history: the configure step compares the parent tree with the commit in ngc-host/LL-RUNTIME-PIN.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
 
@@ -90,7 +90,7 @@ jobs:
           cp ngc-host/shim/slua_shim.h "$RUNNER_TEMP/package/"
           ls -l "$RUNNER_TEMP/package"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ngc-host-${{ matrix.platform }}
           path: ${{ runner.temp }}/package
@@ -104,7 +104,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -129,7 +129,7 @@ jobs:
           echo "bundle version: $version"
 
       # Both platforms' libraries come from this run, each into its own folder.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: ngc-host-*
           path: ${{ runner.temp }}/libs
@@ -143,7 +143,7 @@ jobs:
           (cd "$RUNNER_TEMP/bundle" && sha256sum -c SHA256SUMS.txt)
           cat "$RUNNER_TEMP/bundle/RELEASE-NOTES.md"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: slua-release-bundle
           path: ${{ runner.temp }}/bundle
@@ -159,7 +159,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: slua-release-bundle
           path: ${{ runner.temp }}/bundle
@@ -171,6 +171,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           cd "$RUNNER_TEMP/bundle"
-          # The licence texts go up as single files; SHA256SUMS.txt names them licenses/<file>.
-          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file RELEASE-NOTES.md \
-            ./*.zip ./*.tar.gz ./slua_shim.h ./THIRD-PARTY-NOTICES.txt ./RELEASE-NOTES.md ./SHA256SUMS.txt ./licenses/*
+          # The bundle is flat and every file in it is a release asset, so SHA256SUMS.txt (every other file,
+          # by its asset name) verifies a plain download. A folder here would not survive the upload.
+          [ -z "$(find . -mindepth 1 -type d)" ] || { echo "the bundle holds a folder; release assets are flat"; exit 1; }
+          sha256sum -c SHA256SUMS.txt
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file RELEASE-NOTES.md ./*
