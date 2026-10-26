@@ -1,19 +1,23 @@
 # ngc-host
 
-Hosts the SLua runtime (the parent tree, unmodified) from .NET through a small shared
-library, `slua_shim` (`slua_shim.dll` on Windows x64, `libslua_shim.so` on Linux x64).
+This repository is Linden Lab's SLua runtime (the parent tree, pinned to one commit) plus this folder,
+`ngc-host/`, and the workflow that builds and releases it. The long-lived branch is `ngc`. `ngc-host/`
+turns the runtime into a small shared library, `slua_shim` (`slua_shim.dll` on Windows x64,
+`libslua_shim.so` on Linux x64), that a host process loads through a flat C interface.
 
-- `shim/slua_shim.h`: the flat C interface, documented below. Every export catches all C++
-  exceptions and returns a negative code; the managed side never holds a `lua_State`.
+- `shim/slua_shim.h`: the C interface, documented below. Every export catches all C++ exceptions and
+  returns a negative code; the host never holds a `lua_State`.
 - `shim/slua_shim.cpp`: the implementation over the Executor (`Provisioner`, `Script`).
-- `CMakeLists.txt`, `inject_shim.cmake`: configure the SLua tree as its own top-level project
-  and add the shim target to it. Two compile jobs at most.
-- `dotnet/SluaHost`: managed wrapper (P/Invoke). `dotnet/SluaHost.Tool`: a small console
-  used by the cross-process restore test. `dotnet/SluaHost.Tests`: the tests.
-- `scripts/build-win.cmd`, `scripts/build-linux.sh`, `docker/Dockerfile`: build helpers.
+- `CMakeLists.txt`, `inject_shim.cmake`, `stamp.cmake`: configure the SLua tree as its own top-level
+  project and add the shim target to it. Two compile jobs at most.
+- `LL-RUNTIME-PIN`: the commit of the parent tree the library is built against.
+- `dotnet/SluaHost`, `dotnet/SluaHost.TestKit`, `dotnet/SluaHost.Tool`, `dotnet/SluaHost.Tests`:
+  C# bindings and tests, used to test the library. They are test-only code and are never shipped.
+- `scripts/`: `build-win.cmd`, `build-linux.sh` (builds); `make-bundle.py` (the release bundle);
+  `pack.sh` (the native-only package, from a bundle).
+- `package/UtopiaSkye.SLua.csproj`: the native-only NuGet package project.
 - `THIRD-PARTY-NOTICES.txt`, `licenses/`: licences of everything linked into the library.
-- `../.github/workflows/ngc-host.yml`: builds and tests on Windows and Ubuntu 22.04 for every
-  push to a branch named `ngc-host/...`, and uploads the library with the notices.
+- `../.github/workflows/ngc-host.yml`: the CI and release workflow.
 
 ## Build and test
 
@@ -23,7 +27,7 @@ Windows (Visual Studio 2022 C++ tools; uses their CMake and Ninja):
     set SLUA_SHIM_PATH=<build dir>\slua
     dotnet test dotnet\SluaHost.Tests\SluaHost.Tests.csproj -c Release
 
-Linux (cmake, g++, .NET SDK 10):
+Linux (cmake, g++, .NET SDK 10, python3):
 
     sh scripts/build-linux.sh <repo root> <build dir>
     SLUA_SHIM_PATH=<build dir>/slua dotnet test dotnet/SluaHost.Tests/SluaHost.Tests.csproj -c Release
@@ -31,19 +35,48 @@ Linux (cmake, g++, .NET SDK 10):
 `SLUA_SHIM_PATH` is the folder holding the shared library. `SLUA_R1_OUT`, when set, is a
 folder where the measurement tests append their results.
 
+## Syncing with Linden Lab's runtime
+
+The parent tree must match the commit in `ngc-host/LL-RUNTIME-PIN`; configure stops otherwise (see
+"The build stamp"). To take a newer runtime, merge Linden Lab's tree into `ngc` and, in the same
+change, set `LL-RUNTIME-PIN` to the new commit. That change is made on its own, as a pin-bump, not
+mixed with other work. It changes the runtime part of the build stamp, so scripts a host has saved
+start fresh once. The pin lives only in `LL-RUNTIME-PIN`.
+
+## Releases
+
+Releases come only from CI. Pushing a tag `vX.Y.Z` on `ngc` makes the workflow build and test both
+libraries and publish a GitHub release; every file in the release comes from that run's builds:
+
+- `slua-native-win-x64-X.Y.Z.zip` (`slua_shim.dll`) and `slua-native-linux-x64-X.Y.Z.tar.gz`
+  (`libslua_shim.so`, built on Ubuntu 22.04 so it loads on newer distributions);
+- `slua_shim.h`, `THIRD-PARTY-NOTICES.txt` and the licence texts;
+- `RELEASE-NOTES.md`: the runtime pin, the API version, the stamp format and the build's commit;
+- `SHA256SUMS.txt`: the SHA-256 of every other file (licence texts are named `licenses/<file>`).
+
+A tag that is not on `ngc` is refused. Running the workflow by hand with `dry_run` builds the same
+bundle and keeps it as an artifact (`slua-release-bundle`), and publishes nothing.
+
+The release carries native files only, no managed code. The NuGet package `UtopiaSkye.SLua` is
+packaged from a release by the NGC maintainer, Mike. `scripts/pack.sh <repo root> <bundle> <out>`
+shows how: it checks the bundle against `SHA256SUMS.txt`, then packs `package/UtopiaSkye.SLua.csproj`
+(`runtimes/win-x64/native`, `runtimes/linux-x64/native`, the notices). The C# binding that calls the
+library belongs to NGC itself; the `SluaHost` code here is for testing only.
+
 ## API version
 
-`slua_api_version()` returns `SLUA_API_VERSION` (currently 3). Any change to an export's
-signature, to the meaning of a result code, or to the layout of `slua_value` or
-`slua_step_result` bumps it. A host checks it before calling anything else.
-`slua_struct_size` reports the library's `sizeof` for those two structs so a host can check its
-own layout. `slua_version` returns a text form: `runtime=<pinned SLua commit> api=<n>` (see the build stamp below).
+`slua_api_version()` returns `SLUA_API_VERSION` (currently 3). Changing or removing an export (its
+signature, the meaning of a result code, the layout of `slua_value` or `slua_step_result`) bumps it;
+adding an export does not. A host requires an exact match and checks it before calling anything
+else. `slua_struct_size` reports the library's `sizeof` for those two structs so a host can check its
+own layout. `slua_version` returns a text form: `runtime=<pinned SLua commit> api=<n>` (see the build
+stamp below). The header lists the exports each version added.
 
-Version 3 adds two exports and changes nothing that version 2 hosts call: `slua_add_sleep` (a host
-function asks for a delay) and `slua_register_pausing_fn` (a pausing function the library binds).
-It is a version bump, not just new exports, because a host built for version 2 cannot make
-pausing calls that survive a save, and a saved state records the bound-function list, which now
-distinguishes a pausing function from a plain one of the same name.
+Version 3 added `slua_add_sleep` (a host function asks for a delay), `slua_register_pausing_fn` (a
+pausing function the library binds) and `slua_debug_alloc_stats` (what the library holds now). It is
+a version bump because a host built for version 2 cannot make pausing calls that survive a save, and
+a saved state records the bound-function list, which now distinguishes a pausing function from a
+plain one of the same name.
 
 ## Threading rule
 
@@ -109,6 +142,8 @@ Lifecycle and information:
 - `slua_init()`: one-time setup; every export that needs it calls it.
 - `slua_free(p)`: releases memory the library returned.
 - `slua_busy_violations()`: the process-wide count of refused concurrent calls.
+- `slua_debug_alloc_stats(out, n)`: fills up to 6 counters: live VMs, images and scripts, blocks handed to
+  the host and not yet released with `slua_free`, their bytes, and the bytes in use on the C heap.
 
 Compiling:
 

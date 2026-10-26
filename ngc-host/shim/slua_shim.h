@@ -11,16 +11,24 @@
 //  - A slua_vm is used by one thread at a time. A second concurrent caller is
 //    refused with SLUA_ERR_BUSY and counted (slua_busy_violations).
 //
-// Version history:
-//   2  value types key, rotation and list; shared images; memory ceiling; events with arguments; timers.
-//   3  slua_add_sleep (a host function adds a delay to its script) and slua_register_pausing_fn
-//      (a pausing function the library binds, which a waiting script can be saved inside).
+// Version history, with the exports each version added (a host that checks the version needs an
+// exact match; a library of another version is refused):
+//   1  slua_version, slua_set_log, slua_init, slua_compile, slua_free, slua_vm_new, slua_vm_free,
+//      slua_register_host_fn, slua_watchdog_stats, slua_script_new, slua_script_free,
+//      slua_script_start, slua_step, slua_kill, slua_serialize, slua_restore, slua_fault,
+//      slua_used_memory, slua_get_memory_limit, slua_set_memory_limit, slua_busy_violations.
+//   2  slua_api_version, slua_struct_size, slua_image_new, slua_image_free,
+//      slua_script_new_from_image, slua_event_index, slua_dispatch_event, slua_timer_interval;
+//      value types key, rotation and list; shared images; memory ceiling; events with arguments; timers.
+//   3  slua_add_sleep (a host function adds a delay to its script), slua_register_pausing_fn
+//      (a pausing function the library binds, which a waiting script can be saved inside) and
+//      slua_debug_alloc_stats (what the library holds right now).
 //
-// Versioning rule: any change to the signature of an export, to the meaning of
-// a result code, or to the layout of slua_value or slua_step_result bumps
-// SLUA_API_VERSION. A managed host compares slua_api_version() with the
-// version it was written for before it calls anything else. Adding a new
-// export that changes nothing existing does not need a bump.
+// Versioning rule: changing or removing an export bumps SLUA_API_VERSION. That means a change to
+// the signature of an export, to the meaning of a result code, or to the layout of slua_value or
+// slua_step_result. Adding an export does not change the version. A host compares
+// slua_api_version() with the version it was written for before it calls anything else, and
+// requires an exact match.
 #pragma once
 
 #include <stddef.h>
@@ -146,7 +154,7 @@ SLUA_API int32_t slua_init(void);
 SLUA_API int32_t slua_compile(const char* src, size_t len, int32_t is_lsl, uint8_t** out, size_t* out_len, char** err);
 SLUA_API void slua_free(void* p);
 
-// Diagnostics, not part of the versioned surface: what the library holds right now.
+// What the library holds right now (API version 3).
 // Fills out[0..n) (n up to 6) with: live VMs, live images, live scripts, blocks handed to the
 // host and not yet released with slua_free, their total bytes, and the bytes in use on the
 // process's C heap (0 where the system gives no such figure). Unlike resident memory, none of
