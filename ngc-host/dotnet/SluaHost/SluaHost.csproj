@@ -6,30 +6,9 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
-  <!-- The NuGet package: the managed wrapper plus the native library for Windows x64 and Linux x64.
-       Pack with ngc-host/scripts/pack.sh, which passes the folders holding the two native libraries. -->
+  <!-- Test-only bindings (P/Invoke over slua_shim). This project is not packed or shipped; the release
+       carries the native libraries only (see ngc-host/package). -->
   <PropertyGroup>
-    <PackageId>NGC.Luau</PackageId>
-    <Version>0.1.1-dev</Version>
-    <Authors>Legion Builds</Authors>
-    <Description>Hosts the SLua runtime from .NET through a small native library. The package is MIT licensed and carries code under other licences; see THIRD-PARTY-NOTICES.txt and the licenses folder in the package.</Description>
-    <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageReadmeFile>README.md</PackageReadmeFile>
-    <Copyright>Copyright (c) 2026 Legion Builds</Copyright>
+    <IsPackable>false</IsPackable>
   </PropertyGroup>
-
-  <ItemGroup>
-    <None Include="..\..\README.md" Pack="true" PackagePath="" />
-    <None Include="..\..\..\LICENSE.txt" Pack="true" PackagePath="" />
-    <None Include="..\..\THIRD-PARTY-NOTICES.txt" Pack="true" PackagePath="" />
-    <None Include="..\..\licenses\*.txt" Pack="true" PackagePath="licenses" />
-    <None Include="$(WinNativeDir)\slua_shim.dll" Pack="true" PackagePath="runtimes/win-x64/native" Condition="'$(WinNativeDir)' != ''" />
-    <None Include="$(LinuxNativeDir)\libslua_shim.so" Pack="true" PackagePath="runtimes/linux-x64/native" Condition="'$(LinuxNativeDir)' != ''" />
-  </ItemGroup>
-
-  <!-- A package without both native libraries would install and then fail to load; refuse to make one. -->
-  <Target Name="RequireNativeLibraries" BeforeTargets="GenerateNuspec">
-    <Error Condition="'$(WinNativeDir)' == '' Or '$(LinuxNativeDir)' == ''" Text="Pack with -p:WinNativeDir=&lt;folder with slua_shim.dll&gt; -p:LinuxNativeDir=&lt;folder with libslua_shim.so&gt; (see scripts/pack.sh)." />
-    <Error Condition="!Exists('$(WinNativeDir)\slua_shim.dll') Or !Exists('$(LinuxNativeDir)\libslua_shim.so')" Text="slua_shim.dll or libslua_shim.so not found in the folders given." />
-  </Target>
 </Project>

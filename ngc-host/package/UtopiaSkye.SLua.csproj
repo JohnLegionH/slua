@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- A native-only NuGet package: the SLua shim library for Windows x64 and Linux x64 and the licence
+       notices, no managed assembly. The C# binding is not part of it. Pack with ngc-host/scripts/pack.sh,
+       which takes the files from a release bundle. -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <NoWarn>$(NoWarn);NU5128;NU5100</NoWarn>
+    <PackageId>UtopiaSkye.SLua</PackageId>
+    <Version Condition="'$(Version)' == ''">0.1.0-dev</Version>
+    <Authors>Legion Builds</Authors>
+    <Description>Native library that hosts the SLua runtime (slua_shim for Windows x64 and Linux x64). It carries no managed code. The package is MIT licensed and carries code under other licences; see THIRD-PARTY-NOTICES.txt and the licenses folder in the package.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <Copyright>Copyright (c) 2026 Legion Builds</Copyright>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\README.md" Pack="true" PackagePath="" />
+    <None Include="..\..\LICENSE.txt" Pack="true" PackagePath="" />
+    <None Include="$(BundleDir)\THIRD-PARTY-NOTICES.txt" Pack="true" PackagePath="" Condition="'$(BundleDir)' != ''" />
+    <None Include="$(BundleDir)\licenses\*.txt" Pack="true" PackagePath="licenses" Condition="'$(BundleDir)' != ''" />
+    <None Include="$(WinNativeDir)\slua_shim.dll" Pack="true" PackagePath="runtimes/win-x64/native" Condition="'$(WinNativeDir)' != ''" />
+    <None Include="$(LinuxNativeDir)\libslua_shim.so" Pack="true" PackagePath="runtimes/linux-x64/native" Condition="'$(LinuxNativeDir)' != ''" />
+  </ItemGroup>
+
+  <!-- A package without both native libraries would install and then fail to load; refuse to make one. -->
+  <Target Name="RequireNativeLibraries" BeforeTargets="GenerateNuspec">
+    <Error Condition="'$(BundleDir)' == '' Or '$(WinNativeDir)' == '' Or '$(LinuxNativeDir)' == ''" Text="Pack with ngc-host/scripts/pack.sh, which sets BundleDir, WinNativeDir and LinuxNativeDir from a release bundle." />
+    <Error Condition="!Exists('$(WinNativeDir)\slua_shim.dll') Or !Exists('$(LinuxNativeDir)\libslua_shim.so')" Text="slua_shim.dll or libslua_shim.so not found in the folders given." />
+  </Target>
+</Project>
