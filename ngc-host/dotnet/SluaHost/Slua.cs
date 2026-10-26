@@ -103,6 +103,14 @@ public static unsafe class Host
         return Marshal.PtrToStringUTF8((IntPtr)buf)!;
     }
 
+    /// <summary>What the library holds right now; see slua_debug_alloc_stats. A diagnostic for tests and monitoring.</summary>
+    public static AllocStats GetAllocStats()
+    {
+        ulong* v = stackalloc ulong[6];
+        Check("slua_debug_alloc_stats", Native.slua_debug_alloc_stats(v, 6));
+        return new AllocStats(v[0], v[1], v[2], v[3], v[4], v[5]);
+    }
+
     public static int BusyViolations() => Native.slua_busy_violations();
 
     /// <summary>The API version the loaded library reports. A host written for another version must not call it.</summary>
@@ -289,6 +297,7 @@ public sealed unsafe class Script : IDisposable
     readonly Vm _vm;
     IntPtr _h;
     internal Script(Vm vm, IntPtr h) { _vm = vm; _h = h; }
+    internal IntPtr Handle => _h;
 
     public void Start() => Host.Check("slua_script_start", Native.slua_script_start(_h));
 
@@ -389,3 +398,6 @@ public sealed unsafe class Script : IDisposable
         }
     }
 }
+
+/// <summary>Live native objects and bytes, as the library counts them. HeapInUseBytes is 0 where the system gives no figure.</summary>
+public readonly record struct AllocStats(ulong LiveVms, ulong LiveImages, ulong LiveScripts, ulong OutstandingBlocks, ulong OutstandingBytes, ulong HeapInUseBytes);

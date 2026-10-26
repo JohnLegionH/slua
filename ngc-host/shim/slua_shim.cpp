@@ -623,6 +623,15 @@ SLUA_API int32_t slua_init(void)
     SLUA_CATCH
 }
 
+SLUA_API int32_t slua_debug_alloc_stats(uint64_t* out, int32_t n)
+{
+    if (out == nullptr || n < 0 || n > 6)
+        return SLUA_ERR_BAD_ARG;
+    for (int32_t i = 0; i < n; i++)
+        out[i] = 0;
+    return SLUA_OK;
+}
+
 SLUA_API void slua_free(void* p)
 {
     std::free(p);

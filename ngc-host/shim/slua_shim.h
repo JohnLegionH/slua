@@ -146,6 +146,13 @@ SLUA_API int32_t slua_init(void);
 SLUA_API int32_t slua_compile(const char* src, size_t len, int32_t is_lsl, uint8_t** out, size_t* out_len, char** err);
 SLUA_API void slua_free(void* p);
 
+// Diagnostics, not part of the versioned surface: what the library holds right now.
+// Fills out[0..n) (n up to 6) with: live VMs, live images, live scripts, blocks handed to the
+// host and not yet released with slua_free, their total bytes, and the bytes in use on the
+// process's C heap (0 where the system gives no such figure). Unlike resident memory, none of
+// these moves when the system allocator grows or shrinks the process.
+SLUA_API int32_t slua_debug_alloc_stats(uint64_t* out, int32_t n);
+
 SLUA_API int32_t slua_vm_new(int32_t watchdog_mode, slua_vm** out);
 SLUA_API int32_t slua_vm_free(slua_vm* vm);
 // Host functions must be registered before the first script is created.

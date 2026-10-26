@@ -87,6 +87,7 @@ internal static unsafe class Native
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_dispatch_event(IntPtr s, int ev, SluaValue* args, int nargs, double quanta, StepResultN* r);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_compile(byte* src, nuint len, int isLsl, byte** o, nuint* outLen, byte** err);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern void slua_free(void* p);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_debug_alloc_stats(ulong* o, int n);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_vm_new(int watchdog, IntPtr* o);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_vm_free(IntPtr vm);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
