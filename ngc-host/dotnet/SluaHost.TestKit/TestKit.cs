@@ -6,8 +6,8 @@ namespace SluaHost;
 
 /// <summary>
 /// The host functions the deciding tests and the cross-process tool register,
-/// plus the sink they report into. Kept in the library so a second process
-/// binds exactly the same function list.
+/// plus the sink they report into. Kept in a test-only project, shared by the
+/// tests and the tool so a second process binds exactly the same function list.
 /// </summary>
 public sealed class TestKit
 {

@@ -7,5 +7,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\SluaHost\SluaHost.csproj" />
+    <ProjectReference Include="..\SluaHost.TestKit\SluaHost.TestKit.csproj" />
   </ItemGroup>
 </Project>
