@@ -11,6 +11,11 @@
 //  - A slua_vm is used by one thread at a time. A second concurrent caller is
 //    refused with SLUA_ERR_BUSY and counted (slua_busy_violations).
 //
+// Version history:
+//   2  value types key, rotation and list; shared images; memory ceiling; events with arguments; timers.
+//   3  slua_add_sleep (a host function adds a delay to its script) and slua_register_pausing_fn
+//      (a pausing function the library binds, which a waiting script can be saved inside).
+//
 // Versioning rule: any change to the signature of an export, to the meaning of
 // a result code, or to the layout of slua_value or slua_step_result bumps
 // SLUA_API_VERSION. A managed host compares slua_api_version() with the
@@ -45,7 +50,7 @@
 #define SLUA_ERR_UNSUPPORTED_FUNCTION (-10) // LSL source calls an os*, iw* or bot* function; *err names it
 
 // The API version this header describes; see the versioning rule above.
-#define SLUA_API_VERSION 2
+#define SLUA_API_VERSION 3
 
 // Highest memory limit a script can have. A host may lower a limit, never raise it past this.
 #define SLUA_MEMORY_LIMIT_MAX (128 * 1024)

@@ -497,4 +497,31 @@ public class ApiV3Tests
         Assert.Equal(StepStatus.Ok, s.Step().Status);
         Assert.Equal(new[] { "num:5" }, rig.Kit.Snapshot());
     }
+
+    [Fact]
+    public void B6_AScriptWaitingInAPlainHostFunctionYieldCanAlsoBeSavedAndRestored()
+    {
+        // Recorded behaviour of version 2, not new: the pausing function is the form to use, but the plain yield saves too.
+        const string source = """
+            ossl.Report("before")
+            ossl.StartAsyncYield(5)
+            local r = ossl.TakeResult()
+            ossl.Report("got", r)
+            """;
+        byte[] state;
+        using (var rig = new Rig(pausing: false))
+        {
+            using var s = rig.Run(source, tag: 7);
+            Assert.Equal(StepStatus.Preempted, s.Step().Status);
+            state = s.Serialize();
+        }
+        using (var rig2 = new Rig(pausing: false))
+        {
+            using var s2 = rig2.Fresh(Host.Compile(source, false), tag: 7);
+            Assert.True(s2.Restore(state));
+            rig2.Kit.Results[7] = Value.Int(9);
+            Assert.Equal(StepStatus.Ok, s2.Step().Status);
+            Assert.Equal(new[] { "str:got num:9" }, rig2.Kit.Snapshot());
+        }
+    }
 }

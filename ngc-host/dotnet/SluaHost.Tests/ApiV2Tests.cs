@@ -29,12 +29,6 @@ public class ApiV2Tests
     // ---- The version function ----
 
     [Fact]
-    public void B6_ApiVersionIsTwo()
-    {
-        Assert.Equal(2, Host.ApiVersion());
-    }
-
-    [Fact]
     public unsafe void B6_ManagedStructLayoutMatchesTheNativeOne()
     {
         int nativeValue = Host.NativeStructSize(0), nativeStep = Host.NativeStructSize(1);

@@ -33,11 +33,17 @@ folder where the measurement tests append their results.
 
 ## API version
 
-`slua_api_version()` returns `SLUA_API_VERSION` (currently 2). Any change to an export's
+`slua_api_version()` returns `SLUA_API_VERSION` (currently 3). Any change to an export's
 signature, to the meaning of a result code, or to the layout of `slua_value` or
 `slua_step_result` bumps it. A host checks it before calling anything else.
 `slua_struct_size` reports the library's `sizeof` for those two structs so a host can check its
 own layout. `slua_version` returns a text form: `runtime=<SLua commit> api=<n>`.
+
+Version 3 adds two exports and changes nothing that version 2 hosts call: `slua_add_sleep` (a host
+function asks for a delay) and `slua_register_pausing_fn` (a pausing function the library binds).
+It is a version bump, not just new exports, because a host built for version 2 cannot make
+pausing calls that survive a save, and a saved state records the bound-function list, which now
+distinguishes a pausing function from a plain one of the same name.
 
 ## Threading rule
 
@@ -121,6 +127,9 @@ VMs and host functions:
   (`SLUA_ERR_STATE` after). `cb` receives the arguments as `slua_value` records, writes up to
   8 return values and returns how many; `SLUA_RET_YIELD` yields the script with no values; any
   other negative value raises a script error whose text is `rets[0]` (a string).
+- `slua_register_pausing_fn(vm, table, name, start_id, take_id, cb, user)`: binds `table.name` as
+  a pausing function (see "Pausing calls"). Same rule as `slua_register_host_fn`: before the first
+  image is made, `SLUA_ERR_STATE` after.
 - `slua_watchdog_stats(vm, &fires, &late_fires)`.
 
 Images and scripts:
@@ -146,6 +155,11 @@ Images and scripts:
   the library keeps the handler set current.
 - `slua_timer_interval(script, &seconds)`: the interval an SLua script last asked for through
   `LLTimers`, 0 when it has none. The host dispatches a `timer` event at that time.
+- `slua_add_sleep(script, seconds)`: adds a delay to the script. The next step reports it in
+  `sleep_served`, and the scheduler waits that long before stepping the script again. Valid only
+  inside a host function that this script called (`SLUA_ERR_STATE` anywhere else, including from
+  another script's host function), on the thread running that function. `seconds` must be finite
+  and above zero (`SLUA_ERR_BAD_ARG`). Calls add up. The delay is part of the saved state.
 - `slua_kill(script)`: aborts a handler in flight, or faults an idle script.
 - `slua_fault(script, &kind, buf, cap)`: the fault kind (`SLUA_FAULT_*`) and its text.
 
@@ -183,12 +197,43 @@ or for less than the script already uses, returns `SLUA_ERR_LIMIT` and leaves th
 was. `slua_script_new` and `slua_script_new_from_image` refuse a limit above the ceiling the same
 way (0 means the default). The Executor's unchecked setter is not exposed.
 
+## Delays
+
+Many `ll` functions make the calling script wait after they return (the call delays of the Second
+Life wiki). A host function does that with `slua_add_sleep` from inside the call, rather than by
+sleeping itself. The step that follows reports the total in `sleep_served`; the scheduler honours it
+(the engine's own punishment for an overrunning script travels the same way). A script that asked for
+a delay is paused by the runtime at its next safe point. A delay that has been asked for and not
+yet served is saved with the script and reported again by the first step after a restore.
+
 ## Pausing calls
 
-A host function that has to wait for something (a dataserver reply, a region call) does not block
-the VM and does not yield from inside the host call. The script calls a Lua-side wrapper that
-starts the work with one host call, calls `coroutine.yield()`, and after the host resumes it with
-another step, fetches the result with a second host call:
+A host function that has to wait for something (a dataserver reply, a region call) must not block
+the VM. Register it with `slua_register_pausing_fn(vm, table, name, start_id, take_id, cb, user)`:
+
+1. The script calls `table.name(...)`. The library calls `cb` with `start_id` and the call's
+   arguments. The host starts the work and records it under the script's tag. Return values are
+   ignored.
+2. The library yields the script; the step returns `SLUA_STEP_PREEMPTED`. The host does not step the
+   script until the work is done.
+3. The host steps the script again. The library calls `cb` with `take_id` and no arguments; the
+   values it returns (up to 8) are the values of `table.name(...)`. A negative return raises a
+   script error, which the script can catch with `pcall`.
+
+It is bound in the environment for SLua and for LSL scripts alike, so LSL compiled by the runtime's
+compiler calls it as it calls any other `ll` function. The step cannot carry a value into the script,
+which is why the answer travels in the second host call.
+
+Saving state while a script waits inside a pausing call is supported and tested for SLua and for LSL.
+The pending call itself is not part of the saved state: after a restore the first step calls `take_id`
+as usual, and it is the host's job to have an answer or to return its failure value.
+
+The library does the yielding natively. A Lua function made in the environment (a wrapper written in
+Lua and installed before the script runs) cannot take this job: the saved-state writer accepts only
+code that belongs to the script's own image, and refuses to save a script that is suspended inside any
+other Lua function.
+
+A Lua-side wrapper that a script itself contains still works and still saves, as before:
 
     local function await_thing(x)
         host.StartThing(x)       -- host function: starts the work, records it under this script's tag
@@ -196,7 +241,6 @@ another step, fetches the result with a second host call:
         return host.TakeResult() -- host function: returns the stored result
     end
 
-The resume cannot carry a value, because the Executor always resumes with none, so the value
-travels in the second host call. Saving state while the script waits in `coroutine.yield` is
-supported and tested. A host function that returns `SLUA_RET_YIELD` also pauses the script, but
-saving state during that kind of wait is not covered by a test, so it is not used.
+A plain host function that returns `SLUA_RET_YIELD` also pauses the script. It saves and restores as
+well (a script waiting in one was saved and restored in a fresh VM in a test of this version), but it
+leaves the take call to the script, so a pausing function is the form to use.
