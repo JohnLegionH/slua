@@ -253,4 +253,236 @@ public class ApiV3Tests
         }
     }
 
+    // ---- B: pausing functions the library wraps ----
+
+    [Fact]
+    public void B1_SLuaCallToAPausingFunctionPausesTheScriptAndReturnsTheHostsAnswer()
+    {
+        using var rig = new Rig();
+        using var s = rig.Run("""
+            local r1 = ll.GetNotecardLineSync("card", 3)
+            ossl.Report("got", r1)
+            local ok, r2 = pcall(ll.GetNotecardLineSync, "card", 4)
+            ossl.Report("got", ok, r2)
+            """, tag: 5);
+
+        Assert.Equal(StepStatus.Preempted, s.Step().Status);
+        Assert.Equal("str:card num:3", rig.Started[5]);
+        Assert.Empty(rig.Kit.Snapshot());
+
+        rig.Results[5] = new[] { Value.Str("line three") };
+        Assert.Equal(StepStatus.Preempted, s.Step().Status); // the second call, inside pcall
+        Assert.Equal("str:card num:4", rig.Started[5]);
+        Assert.Equal(new[] { "str:got str:line three" }, rig.Kit.Snapshot());
+
+        rig.Results[5] = new[] { Value.Str("line four") };
+        Assert.Equal(StepStatus.Ok, s.Step().Status);
+        Assert.Equal(new[] { "str:got str:line three", "str:got true str:line four" }, rig.Kit.Snapshot());
+    }
+
+    [Fact]
+    public void B1_APausingFunctionCanReturnSeveralValues()
+    {
+        using var rig = new Rig();
+        using var s = rig.Run("""
+            local a, b, c = ll.GetNotecardLineSync("card", 1)
+            ossl.Report(a, b, c)
+            """, tag: 5);
+        Assert.Equal(StepStatus.Preempted, s.Step().Status);
+        rig.Results[5] = new[] { Value.Int(1), Value.Str("two"), Value.Key("12345678-9abc-def0-1234-56789abcdef0") };
+        Assert.Equal(StepStatus.Ok, s.Step().Status);
+        Assert.Equal(new[] { "num:1 str:two key:12345678-9abc-def0-1234-56789abcdef0" }, rig.Kit.Snapshot());
+    }
+
+    [Fact]
+    public void B2_LslCallToAPausingFunctionPausesTheScriptAndReturnsTheHostsAnswer()
+    {
+        using var rig = new Rig();
+        using var s = rig.Run("""
+            default {
+                state_entry() {
+                    string a = llGetNotecardLineSync("card", 7);
+                    llOwnerSay(a);
+                    llOwnerSay(llGetNotecardLineSync("card", 8));
+                }
+            }
+            """, lsl: true, tag: 6);
+
+        Assert.Equal(StepStatus.Preempted, s.Step().Status);
+        Assert.Equal("str:card int:7", rig.Started[6]);
+        Assert.Empty(rig.Kit.Snapshot());
+
+        rig.Results[6] = new[] { Value.Str("line seven") };
+        Assert.Equal(StepStatus.Preempted, s.Step().Status);
+        Assert.Equal("str:card int:8", rig.Started[6]);
+
+        rig.Results[6] = new[] { Value.Str("line eight") };
+        Assert.Equal(StepStatus.Ok, s.Step().Status);
+        Assert.Equal(new[] { "OwnerSay str:line seven", "OwnerSay str:line eight" }, rig.Kit.Snapshot());
+    }
+
+    [Fact]
+    public void B3_SLuaScriptWaitingInAPausingCallSurvivesSaveAndRestoreInAFreshVm()
+    {
+        const string source = """
+            ossl.Report("before")
+            local r = ll.GetNotecardLineSync("card", 3)
+            ossl.Report("got", r)
+            """;
+        byte[] state;
+        using (var rig = new Rig())
+        {
+            using var s = rig.Run(source, tag: 5);
+            Assert.Equal(StepStatus.Preempted, s.Step().Status);
+            Assert.Equal(new[] { "str:before" }, rig.Kit.Snapshot());
+            state = s.Serialize();
+        }
+        using (var rig2 = new Rig())
+        {
+            using var s2 = rig2.Fresh(Host.Compile(source, false), tag: 5);
+            Assert.True(s2.Restore(state));
+            rig2.Results[5] = new[] { Value.Str("late answer") };
+            Assert.Equal(StepStatus.Ok, s2.Step().Status);
+            Assert.Equal(new[] { "str:got str:late answer" }, rig2.Kit.Snapshot());
+        }
+    }
+
+    [Fact]
+    public void B3_LslScriptWaitingInAPausingCallSurvivesSaveAndRestoreInAFreshVm()
+    {
+        const string source = """
+            default {
+                state_entry() {
+                    llOwnerSay("before");
+                    string r = llGetNotecardLineSync("card", 3);
+                    llOwnerSay(r);
+                }
+            }
+            """;
+        byte[] state;
+        using (var rig = new Rig())
+        {
+            using var s = rig.Run(source, lsl: true, tag: 6);
+            Assert.Equal(StepStatus.Preempted, s.Step().Status);
+            Assert.Equal(new[] { "OwnerSay str:before" }, rig.Kit.Snapshot());
+            state = s.Serialize();
+        }
+        using (var rig2 = new Rig())
+        {
+            using var s2 = rig2.Fresh(Host.Compile(source, true), tag: 6);
+            Assert.True(s2.Restore(state));
+            rig2.Results[6] = new[] { Value.Str("late answer") };
+            Assert.Equal(StepStatus.Ok, s2.Step().Status);
+            Assert.Equal(new[] { "OwnerSay str:late answer" }, rig2.Kit.Snapshot());
+        }
+    }
+
+    [Fact]
+    public void B3_StateSavedWithAPausingFunctionIsRefusedByAVmWithoutIt()
+    {
+        const string source = """
+            local r = ll.GetNotecardLineSync("card", 3)
+            ossl.Report("got", r)
+            """;
+        byte[] state;
+        using (var rig = new Rig())
+        {
+            using var s = rig.Run(source);
+            Assert.Equal(StepStatus.Preempted, s.Step().Status);
+            state = s.Serialize();
+        }
+        using (var rig2 = new Rig(pausing: false))
+        {
+            using var s2 = rig2.Fresh(Host.Compile(source, false));
+            Assert.False(s2.Restore(state));
+        }
+    }
+
+    [Fact]
+    public void B3_AFunctionBoundAsPlainIsNotTheSameBindingAsAPausingOne()
+    {
+        const string source = """
+            local r = ll.GetNotecardLineSync("card", 3)
+            ossl.Report("got", r)
+            """;
+        byte[] state;
+        using (var rig = new Rig())
+        {
+            using var s = rig.Run(source);
+            Assert.Equal(StepStatus.Preempted, s.Step().Status);
+            state = s.Serialize();
+        }
+        using (var rig2 = new Rig(pausing: false))
+        {
+            rig2.Vm.Register("ll", "GetNotecardLineSync", (_, _) => new[] { Value.Str("plain") });
+            using var s2 = rig2.Fresh(Host.Compile(source, false));
+            Assert.False(s2.Restore(state));
+        }
+    }
+
+    [Fact]
+    public void B4_AnErrorFromTheTakeCallIsAScriptErrorTheScriptCanCatch()
+    {
+        using var rig = new Rig(pausing: false);
+        rig.Vm.RegisterPausing("ll", "GetNotecardLineSync",
+            (tag, a) => null,
+            (tag, a) => throw new InvalidOperationException("answer lost"));
+        using var s = rig.Run("""
+            local ok, err = pcall(ll.GetNotecardLineSync, "card", 3)
+            ossl.Report(ok, err)
+            """);
+        Assert.Equal(StepStatus.Preempted, s.Step().Status);
+        Assert.Equal(StepStatus.Ok, s.Step().Status);
+        var line = Assert.Single(rig.Kit.Snapshot());
+        Assert.StartsWith("false ", line, StringComparison.Ordinal);
+        Assert.Contains("answer lost", line);
+    }
+
+    [Fact]
+    public void B4_AnErrorFromTheStartCallRaisesBeforeTheScriptPauses()
+    {
+        using var rig = new Rig(pausing: false);
+        rig.Vm.RegisterPausing("ll", "GetNotecardLineSync",
+            (tag, a) => throw new InvalidOperationException("cannot start"),
+            (tag, a) => null);
+        using var s = rig.Run("""
+            local ok, err = pcall(ll.GetNotecardLineSync, "card", 3)
+            ossl.Report(ok, err)
+            """);
+        Assert.Equal(StepStatus.Ok, s.Step().Status);
+        Assert.Contains("cannot start", Assert.Single(rig.Kit.Snapshot()));
+    }
+
+    [Fact]
+    public void B4_ARequestToYieldFromAPausingCallIsAScriptError()
+    {
+        using var rig = new Rig(pausing: false);
+        rig.Vm.RegisterPausing("ll", "GetNotecardLineSync",
+            (tag, a) => Host.Yield,
+            (tag, a) => null);
+        using var s = rig.Run("""
+            local ok, err = pcall(ll.GetNotecardLineSync, "card", 3)
+            ossl.Report(ok, err)
+            """);
+        Assert.Equal(StepStatus.Ok, s.Step().Status);
+        Assert.Contains("yield", Assert.Single(rig.Kit.Snapshot()));
+    }
+
+    [Fact]
+    public void B5_PausingFunctionsCannotBeRegisteredAfterTheFirstImage()
+    {
+        using var rig = new Rig();
+        using var s = rig.Run("ossl.Report('x')");
+        var e = Assert.Throws<SluaException>(() => rig.Vm.RegisterPausing("ll", "Other", (_, _) => null, (_, _) => null));
+        Assert.Equal(-8, e.Code);
+    }
+
+    [Fact]
+    public void B5_AScriptThatDoesNotCallThePausingFunctionIsNotAffectedByItsPresence()
+    {
+        using var rig = new Rig();
+        using var s = rig.Run("ossl.Report(ossl.Add(2, 3))");
+        Assert.Equal(StepStatus.Ok, s.Step().Status);
+        Assert.Equal(new[] { "num:5" }, rig.Kit.Snapshot());
+    }
 }
