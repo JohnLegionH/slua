@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Legion Builds
 // Licensed under the MIT License; see LICENSE.txt in the repository root.
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Text;
 using SluaHost;
 using Xunit;
@@ -22,11 +23,13 @@ public class StampTests
 
     // The throwaway repositories are left in the system temp folder: git's object files are read-only,
     // and a CI runner's temp folder is discarded with the runner.
-    static string FindRepoRoot()
+    // Found from this source file's own path (recorded at compile time), so it works when the
+    // build output is kept outside the repository.
+    static string FindRepoRoot([CallerFilePath] string here = "")
     {
-        for (var d = new DirectoryInfo(AppContext.BaseDirectory); d != null; d = d.Parent)
+        for (var d = new DirectoryInfo(Path.GetDirectoryName(here)!); d != null; d = d.Parent)
             if (File.Exists(Path.Combine(d.FullName, "ngc-host", "CMakeLists.txt"))) return d.FullName;
-        throw new InvalidOperationException("repository root not found");
+        throw new InvalidOperationException("repository root not found from " + here);
     }
 
     static (int Code, string Output) Run(string exe, string dir, params string[] args)
