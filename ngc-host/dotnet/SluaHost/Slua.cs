@@ -134,7 +134,7 @@ public static unsafe class Host
     }
 
     /// <summary>The bit an event has in a handler mask, from its LSL name such as "touch_start".</summary>
-    public static ulong EventBit(string name) => 0;
+    public static ulong EventBit(string name) => 1UL << (EventIndex(name) - 1);
 
     /// <summary>Compiles source to an asset. Throws SluaException (code -5) with the compiler message on failure.</summary>
     public static byte[] Compile(string source, bool lsl)
@@ -366,7 +366,12 @@ public sealed unsafe class Script : IDisposable
     public void AddSleep(double seconds) => Host.Check("slua_add_sleep", Native.slua_add_sleep(_h, seconds));
 
     /// <summary>The events the script handles now, one bit each (see <see cref="Host.EventBit"/>), and whether that set is complete.</summary>
-    public (ulong Mask, bool Known) Handlers() => (0, false);
+    public (ulong Mask, bool Known) Handlers()
+    {
+        ulong mask; int known;
+        Host.Check("slua_handler_mask", Native.slua_handler_mask(_h, &mask, &known));
+        return (mask, known != 0);
+    }
 
     public ulong HandlerMask => Handlers().Mask;
     public bool HandlersKnown => Handlers().Known;

@@ -171,6 +171,9 @@ struct slua_script : LiveCounted<slua_script>
     double timerInterval = 0.0;
     // Host functions of this script that are running now; slua_add_sleep is valid only while this is above zero.
     std::atomic<int> hostCallDepth{0};
+    // The handler set the host last read or was told in a step result (see noteHandlers).
+    uint64_t reportedHandlers = 0;
+    int32_t reportedHandlersKnown = 0;
     // Set by slua_add_sleep, cleared when a host function starts; tells the call's end that it asked for a delay.
     std::atomic<bool> delayAddedInCall{false};
 };
@@ -1084,6 +1087,27 @@ double threadCpuSeconds()
 #endif
 }
 
+// The handler set as the host sees it: one bit per event the script handles, and whether the set is
+// complete (always for LSL; for SLua once the main chunk has run).
+void currentHandlers(const Script& script, uint64_t& mask, int32_t& known)
+{
+    mask = script.getEventHandlers();
+    known = script.eventHandlersKnown() ? 1 : 0;
+}
+
+// Tells the host the handler set: returns whether it differs from what the host last read
+// (slua_handler_mask) or was told by a step result, and makes the current set the one it knows.
+int32_t noteHandlers(slua_script& owner)
+{
+    uint64_t mask;
+    int32_t known;
+    currentHandlers(*owner.script, mask, known);
+    const bool changed = mask != owner.reportedHandlers || known != owner.reportedHandlersKnown;
+    owner.reportedHandlers = mask;
+    owner.reportedHandlersKnown = known;
+    return changed ? 1 : 0;
+}
+
 // The delay the script is owed, which the step reports to the host and clears. A step takes it
 // twice: at the start, for a delay that was saved with the script, and at the end, for a delay the
 // script's own run asked for (a host function, or the runtime's punishment for a long run).
@@ -1140,6 +1164,7 @@ SLUA_API int32_t slua_step(slua_script* s, double quanta_seconds, slua_step_resu
             else
             {
                 result->status = SLUA_STEP_IDLE;
+                result->handlers_changed = noteHandlers(*s);
                 return SLUA_OK;
             }
 
@@ -1160,6 +1185,7 @@ SLUA_API int32_t slua_step(slua_script* s, double quanta_seconds, slua_step_resu
     result->fault_kind = (int32_t)script.getFaultKind();
     result->sleep_served += takeSleep(script);
     result->cpu_seconds = std::max(0.0, threadCpuSeconds() - cpuStart);
+    result->handlers_changed = noteHandlers(*s);
     return SLUA_OK;
     SLUA_CATCH
 }
@@ -1230,6 +1256,7 @@ SLUA_API int32_t slua_dispatch_event(slua_script* s, int32_t event, const slua_v
     if (script.eventHandlersKnown() && !(script.getEventHandlers() & Luau::lslEventBit(event)))
     {
         result->status = SLUA_STEP_NOT_RUN;
+        result->handlers_changed = noteHandlers(*s);
         return SLUA_OK;
     }
 
@@ -1245,6 +1272,7 @@ SLUA_API int32_t slua_dispatch_event(slua_script* s, int32_t event, const slua_v
     result->fault_kind = (int32_t)script.getFaultKind();
     result->sleep_served += takeSleep(script);
     result->cpu_seconds = std::max(0.0, threadCpuSeconds() - cpuStart);
+    result->handlers_changed = noteHandlers(*s);
     return SLUA_OK;
     SLUA_CATCH
 }
@@ -1264,7 +1292,21 @@ SLUA_API int32_t slua_timer_interval(slua_script* s, double* seconds)
 
 SLUA_API int32_t slua_handler_mask(slua_script* s, uint64_t* mask, int32_t* known)
 {
-    return SLUA_ERR_NOT_IMPLEMENTED;
+    SLUA_TRY
+    if (s == nullptr || mask == nullptr)
+        return SLUA_ERR_BAD_ARG;
+    VmGuard guard(s->vm);
+    if (!guard.ok())
+        return SLUA_ERR_BUSY;
+    int32_t isKnown;
+    currentHandlers(*s->script, *mask, isKnown);
+    if (known != nullptr)
+        *known = isKnown;
+    // The host has the set now, so the next step reports a change only from here.
+    s->reportedHandlers = *mask;
+    s->reportedHandlersKnown = isKnown;
+    return SLUA_OK;
+    SLUA_CATCH
 }
 
 SLUA_API int32_t slua_kill(slua_script* s)

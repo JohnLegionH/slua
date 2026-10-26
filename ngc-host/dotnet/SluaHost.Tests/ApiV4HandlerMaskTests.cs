@@ -104,31 +104,6 @@ public class ApiV4HandlerMaskTests
     }
 
     [Fact]
-    public void HandlerMask_ReadingTheMaskCountsAsTellingTheHost()
-    {
-        const string source = """
-            LLEvents:on("touch_start", function() end)
-            coroutine.yield()
-            """;
-        byte[] state;
-        using (var rig = new V4Rig())
-        {
-            using var s = rig.Run(source);
-            Assert.Equal(StepStatus.Preempted, s.Step().Status);
-            state = s.Serialize();
-        }
-        using (var rig2 = new V4Rig())
-        {
-            using var s2 = rig2.Fresh(Host.Compile(source, false));
-            Assert.True(s2.Restore(state));
-            // The host reads the restored set before it steps the script, so the step has nothing new to say.
-            Assert.Equal(Bit("touch_start"), s2.HandlerMask);
-            Assert.NotEqual(0UL, s2.HandlerMask);
-            Assert.False(s2.Step().HandlersChanged);
-        }
-    }
-
-    [Fact]
     public void HandlerMask_ALslScriptHasTheMaskOfItsCurrentStateAndAStateChangeIsReported()
     {
         using var rig = new V4Rig();
@@ -157,28 +132,44 @@ public class ApiV4HandlerMaskTests
         Assert.Equal(Bit("listen") | Bit("timer"), s.HandlerMask);
     }
 
+    // A script that has finished its main chunk and is paused inside a handler, so a restore of it
+    // changes the handler set the host knows and nothing else about what is complete.
+    const string PausedInAHandler = """
+        LLEvents:on("touch_start", function() coroutine.yield() end)
+        LLEvents:on("sensor", function() end)
+        """;
+
+    static byte[] SavePausedInAHandler()
+    {
+        using var rig = new V4Rig();
+        using var s = rig.Run(PausedInAHandler);
+        s.RunToIdle();
+        Assert.Equal(StepStatus.Preempted, s.Dispatch("touch_start", new[] { Value.Int(1) }).Status);
+        return s.Serialize();
+    }
+
     [Fact]
     public void HandlerMask_ARestoredScriptsSetIsReportedByItsFirstStep()
     {
-        const string source = """
-            LLEvents:on("touch_start", function() end)
-            LLEvents:on("sensor", function() end)
-            coroutine.yield()
-            """;
-        byte[] state;
-        using (var rig = new V4Rig())
-        {
-            using var s = rig.Run(source);
-            Assert.Equal(StepStatus.Preempted, s.Step().Status);
-            state = s.Serialize();
-        }
-        using (var rig2 = new V4Rig())
-        {
-            using var s2 = rig2.Fresh(Host.Compile(source, false));
-            Assert.True(s2.Restore(state));
-            var first = s2.Step();
-            Assert.True(first.HandlersChanged);
-            Assert.Equal(Bit("touch_start") | Bit("sensor"), s2.HandlerMask);
-        }
+        byte[] state = SavePausedInAHandler();
+        using var rig2 = new V4Rig();
+        using var s2 = rig2.Fresh(Host.Compile(PausedInAHandler, false));
+        Assert.True(s2.Restore(state));
+        var first = s2.Step();
+        Assert.True(first.HandlersChanged);
+        Assert.Equal(Bit("touch_start") | Bit("sensor"), s2.HandlerMask);
+        Assert.True(s2.HandlersKnown);
+    }
+
+    [Fact]
+    public void HandlerMask_ReadingTheMaskCountsAsTellingTheHost()
+    {
+        byte[] state = SavePausedInAHandler();
+        using var rig2 = new V4Rig();
+        using var s2 = rig2.Fresh(Host.Compile(PausedInAHandler, false));
+        Assert.True(s2.Restore(state));
+        // The host reads the restored set before it steps the script, so the step has nothing new to say.
+        Assert.Equal(Bit("touch_start") | Bit("sensor"), s2.HandlerMask);
+        Assert.False(s2.Step().HandlersChanged);
     }
 }
