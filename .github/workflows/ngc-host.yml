@@ -2,7 +2,8 @@
 # Licensed under the MIT License; see LICENSE.txt in the repository root.
 #
 # Builds and tests the ngc-host native library on Windows x64 and Linux x64 for every
-# push to a branch named ngc-host/..., and uploads the library with its notices.
+# push to a branch named ngc-host/..., and uploads the library with its notices. A third job
+# packs the NuGet package from the two libraries of the same run and uploads it.
 # Ubuntu 22.04 is used on purpose: a library built there loads on newer distributions.
 name: ngc-host
 
@@ -72,4 +73,48 @@ jobs:
         with:
           name: ngc-host-${{ matrix.platform }}
           path: ${{ runner.temp }}/package
+          if-no-files-found: error
+
+  pack:
+    name: pack
+    needs: build-and-test
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      DOTNET_NOLOGO: '1'
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # Both platforms' libraries come from this run, each into its own folder.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ngc-host-*
+          path: ${{ runner.temp }}/libs
+
+      - name: Pack NGC.Luau
+        shell: bash
+        run: |
+          ls -l "$RUNNER_TEMP"/libs/ngc-host-win-x64 "$RUNNER_TEMP"/libs/ngc-host-linux-x64
+          sh ngc-host/scripts/pack.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/libs/ngc-host-win-x64" "$RUNNER_TEMP/libs/ngc-host-linux-x64" "$RUNNER_TEMP/nupkg"
+          ls -l "$RUNNER_TEMP/nupkg"
+
+      - name: Check the package contents
+        shell: bash
+        run: |
+          pkg=$(ls "$RUNNER_TEMP"/nupkg/NGC.Luau.*.nupkg)
+          unzip -l "$pkg"
+          for entry in lib/net10.0/SluaHost.dll runtimes/win-x64/native/slua_shim.dll runtimes/linux-x64/native/libslua_shim.so THIRD-PARTY-NOTICES.txt LICENSE.txt licenses/Apache-2.0.txt; do
+            unzip -l "$pkg" | grep -q " $entry\$" || { echo "missing from the package: $entry"; exit 1; }
+          done
+          case "$pkg" in *NGC.Luau.0.1.1-dev.nupkg) ;; *) echo "unexpected package name: $pkg"; exit 1;; esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NGC.Luau-nupkg
+          path: ${{ runner.temp }}/nupkg/*.nupkg
           if-no-files-found: error

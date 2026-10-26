@@ -10,7 +10,7 @@
        Pack with ngc-host/scripts/pack.sh, which passes the folders holding the two native libraries. -->
   <PropertyGroup>
     <PackageId>NGC.Luau</PackageId>
-    <Version>0.1.0-dev</Version>
+    <Version>0.1.1-dev</Version>
     <Authors>Legion Builds</Authors>
     <Description>Hosts the SLua runtime from .NET through a small native library. The package is MIT licensed and carries code under other licences; see THIRD-PARTY-NOTICES.txt and the licenses folder in the package.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
