@@ -58,7 +58,7 @@ A tag that is not on `ngc` is refused. Running the workflow by hand with `dry_ru
 bundle and keeps it as an artifact (`slua-release-bundle`), and publishes nothing.
 
 The release carries native files only, no managed code. The NuGet package `UtopiaSkye.SLua` is
-packaged from a release by the NGC maintainer, Mike. `scripts/pack.sh <repo root> <bundle> <out>`
+packaged from a release by the NGC maintainers. `scripts/pack.sh <repo root> <bundle> <out>`
 shows how: it checks the bundle against `SHA256SUMS.txt`, then packs `package/UtopiaSkye.SLua.csproj`
 (`runtimes/win-x64/native`, `runtimes/linux-x64/native`, the notices). The C# binding that calls the
 library belongs to NGC itself; the `SluaHost` code here is for testing only.
