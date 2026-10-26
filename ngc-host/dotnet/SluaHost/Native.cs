@@ -103,6 +103,7 @@ internal static unsafe class Native
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_script_free(IntPtr s);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_script_start(IntPtr s);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_step(IntPtr s, double quanta, StepResultN* r);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_handler_mask(IntPtr s, ulong* mask, int* known);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_kill(IntPtr s);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_serialize(IntPtr s, byte** o, nuint* len);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_restore(IntPtr s, byte* data, nuint len);

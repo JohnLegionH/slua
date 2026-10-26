@@ -1262,6 +1262,11 @@ SLUA_API int32_t slua_timer_interval(slua_script* s, double* seconds)
     SLUA_CATCH
 }
 
+SLUA_API int32_t slua_handler_mask(slua_script* s, uint64_t* mask, int32_t* known)
+{
+    return SLUA_ERR_NOT_IMPLEMENTED;
+}
+
 SLUA_API int32_t slua_kill(slua_script* s)
 {
     SLUA_TRY

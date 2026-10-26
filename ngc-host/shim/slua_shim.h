@@ -225,6 +225,14 @@ SLUA_API int32_t slua_timer_interval(slua_script* s, double* seconds);
 // (otherwise SLUA_ERR_STATE); seconds must be finite and above zero (otherwise SLUA_ERR_BAD_ARG).
 // Calls add up.
 SLUA_API int32_t slua_add_sleep(slua_script* s, double seconds);
+// The events the script handles now (API 4). *mask gets one bit per event: the bit of the event
+// whose index slua_event_index returns is (1 << (index - 1)). *known gets 1 when the set is
+// complete: always for LSL, and for SLua once the script's main chunk has run (before that handlers
+// can still be registered, so a host should queue events for it). SLua registers handlers while it
+// runs (LLEvents:on and :off), so the set can change in any step; the step result's
+// handlers_changed says so. known may be NULL. Reading the mask counts as telling the host: the
+// next step reports a change only if the set differs from what the host last read or was told.
+SLUA_API int32_t slua_handler_mask(slua_script* s, uint64_t* mask, int32_t* known);
 SLUA_API int32_t slua_kill(slua_script* s);
 
 SLUA_API int32_t slua_serialize(slua_script* s, uint8_t** out, size_t* out_len);
