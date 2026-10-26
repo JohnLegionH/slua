@@ -22,6 +22,7 @@ STAGE="$OUT/stage"
 mkdir -p "$STAGE/win" "$STAGE/linux"
 unzip -q -o "$ZIP" -d "$STAGE/win"
 tar -xzf - -C "$STAGE/linux" < "$BUNDLE/slua-native-linux-x64-$VERSION.tar.gz"
+unzip -q -o "$BUNDLE/licenses.zip" -d "$STAGE"   # gives $STAGE/licenses, which the package carries as licenses/
 dotnet pack "$REPO/ngc-host/package/UtopiaSkye.SLua.csproj" -c Release \
-    -p:Version="$VERSION" -p:BundleDir="$BUNDLE" -p:WinNativeDir="$STAGE/win" -p:LinuxNativeDir="$STAGE/linux" \
+    -p:Version="$VERSION" -p:BundleDir="$BUNDLE" -p:LicensesDir="$STAGE/licenses" -p:WinNativeDir="$STAGE/win" -p:LinuxNativeDir="$STAGE/linux" \
     --artifacts-path "$STAGE/art" -o "$OUT" -nodeReuse:false -p:UseSharedCompilation=false "$@"

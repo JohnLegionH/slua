@@ -10,7 +10,10 @@ build job uploads them. The bundle is:
 
   slua-native-win-x64-<version>.zip         slua_shim.dll
   slua-native-linux-x64-<version>.tar.gz    libslua_shim.so
-  slua_shim.h  THIRD-PARTY-NOTICES.txt  licenses/  RELEASE-NOTES.md  SHA256SUMS.txt
+  slua_shim.h  THIRD-PARTY-NOTICES.txt  licenses.zip  RELEASE-NOTES.md  SHA256SUMS.txt
+
+licenses.zip holds the licence texts under licenses/. The bundle is flat, like the release page:
+every file in it is one release asset, and SHA256SUMS.txt lists exactly the other files by those names.
 
 The archives are written with fixed timestamps and owners, so the same libraries always give the
 same archive bytes. A library that does not carry the runtime commit from ngc-host/LL-RUNTIME-PIN
@@ -65,7 +68,7 @@ def main(argv):
         fail("SLUA_API_VERSION not found in slua_shim.h")
     api = m.group(1)
 
-    os.makedirs(os.path.join(out, "licenses"), exist_ok=True)
+    os.makedirs(out, exist_ok=True)
 
     with zipfile.ZipFile(os.path.join(out, "slua-native-win-x64-%s.zip" % version), "w") as z:
         info = zipfile.ZipInfo("slua_shim.dll", date_time=(2025, 1, 1, 0, 0, 0))
@@ -86,7 +89,16 @@ def main(argv):
             g.write(raw.getvalue())
 
     for rel in shared:
-        shutil.copyfile(os.path.join(linux, rel), os.path.join(out, rel))
+        if not rel.startswith("licenses"):
+            shutil.copyfile(os.path.join(linux, rel), os.path.join(out, rel))
+
+    with zipfile.ZipFile(os.path.join(out, "licenses.zip"), "w") as z:
+        for rel in shared:
+            if rel.startswith("licenses"):
+                info = zipfile.ZipInfo(rel.replace(os.sep, "/"), date_time=(2025, 1, 1, 0, 0, 0))
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = 0o644 << 16
+                z.writestr(info, read(os.path.join(linux, rel)))
 
     notes = """# Release %(version)s
 
@@ -107,7 +119,7 @@ every other file in the release (check with `sha256sum -c SHA256SUMS.txt`).
 | `slua-native-win-x64-%(version)s.zip` | `slua_shim.dll` |
 | `slua-native-linux-x64-%(version)s.tar.gz` | `libslua_shim.so`, built on Ubuntu 22.04 |
 | `slua_shim.h` | the C interface |
-| `THIRD-PARTY-NOTICES.txt`, `licenses/` | licences of everything linked into the libraries |
+| `THIRD-PARTY-NOTICES.txt`, `licenses.zip` | licences of everything linked into the libraries |
 """ % dict(version=version, pin=pin, api=api, commit=commit)
     with open(os.path.join(out, "RELEASE-NOTES.md"), "w", newline="\n") as f:
         f.write(notes)

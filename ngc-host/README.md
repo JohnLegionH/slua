@@ -50,9 +50,9 @@ libraries and publish a GitHub release; every file in the release comes from tha
 
 - `slua-native-win-x64-X.Y.Z.zip` (`slua_shim.dll`) and `slua-native-linux-x64-X.Y.Z.tar.gz`
   (`libslua_shim.so`, built on Ubuntu 22.04 so it loads on newer distributions);
-- `slua_shim.h`, `THIRD-PARTY-NOTICES.txt` and the licence texts;
+- `slua_shim.h`, `THIRD-PARTY-NOTICES.txt` and `licenses.zip` (the licence texts under `licenses/`);
 - `RELEASE-NOTES.md`: the runtime pin, the API version, the stamp format and the build's commit;
-- `SHA256SUMS.txt`: the SHA-256 of every other file (licence texts are named `licenses/<file>`).
+- `SHA256SUMS.txt`: the SHA-256 of every other file (by the names the files have on the release page, so a plain download checks with `sha256sum -c SHA256SUMS.txt`).
 
 A tag that is not on `ngc` is refused. Running the workflow by hand with `dry_run` builds the same
 bundle and keeps it as an artifact (`slua-release-bundle`), and publishes nothing.

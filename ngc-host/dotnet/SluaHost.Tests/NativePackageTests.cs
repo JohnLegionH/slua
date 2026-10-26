@@ -80,10 +80,8 @@ public class NativePackageTests
         var expected = new SortedSet<string>(StringComparer.Ordinal)
         {
             $"slua-native-win-x64-{Version}.zip", $"slua-native-linux-x64-{Version}.tar.gz", "slua_shim.h",
-            "THIRD-PARTY-NOTICES.txt", "RELEASE-NOTES.md", "SHA256SUMS.txt",
+            "THIRD-PARTY-NOTICES.txt", "licenses.zip", "RELEASE-NOTES.md", "SHA256SUMS.txt",
         };
-        foreach (var f in Directory.GetFiles(Path.Combine(RepoRoot, "ngc-host", "licenses")))
-            expected.Add("licenses/" + Path.GetFileName(f));
         var actual = Directory.GetFiles(bundle, "*", SearchOption.AllDirectories)
             .Select(f => Path.GetRelativePath(bundle, f).Replace('\\', '/')).ToList();
         Assert.Equal(expected, new SortedSet<string>(actual, StringComparer.Ordinal));
@@ -98,6 +96,16 @@ public class NativePackageTests
         // The archives hold the one library each.
         using (var zip = ZipFile.OpenRead(Path.Combine(bundle, $"slua-native-win-x64-{Version}.zip")))
             Assert.Equal(new[] { "slua_shim.dll" }, zip.Entries.Select(e => e.FullName).ToArray());
+
+        // The licence texts are one asset, byte for byte the repository's, with fixed timestamps.
+        using (var lic = ZipFile.OpenRead(Path.Combine(bundle, "licenses.zip")))
+        {
+            var repoLicences = Directory.GetFiles(Path.Combine(RepoRoot, "ngc-host", "licenses")).OrderBy(f => f, StringComparer.Ordinal).ToList();
+            Assert.Equal(repoLicences.Select(f => "licenses/" + Path.GetFileName(f)), lic.Entries.Select(e => e.FullName));
+            foreach (var f in repoLicences)
+                Assert.Equal(File.ReadAllText(f), ReadEntry(lic, "licenses/" + Path.GetFileName(f)));
+            Assert.All(lic.Entries, e => Assert.Equal(new DateTime(2025, 1, 1, 0, 0, 0), e.LastWriteTime.DateTime));
+        }
 
         // The notes state the pin, the API version, the stamp format, the build's commit and the version.
         string notes = File.ReadAllText(Path.Combine(bundle, "RELEASE-NOTES.md"));
@@ -129,7 +137,7 @@ public class NativePackageTests
         // Nothing is listed twice or left unlisted: the list names exactly the other files.
         var listed = File.ReadAllLines(Path.Combine(flat, "SHA256SUMS.txt")).Where(l => l.Length > 0)
             .Select(l => l.Split("  ", 2)[1].TrimStart('*')).OrderBy(n => n, StringComparer.Ordinal).ToList();
-        var present = Directory.GetFiles(flat).Select(Path.GetFileName).Where(n => n != "SHA256SUMS.txt")
+        var present = Directory.GetFiles(flat).Select(f => Path.GetFileName(f)!).Where(n => n != "SHA256SUMS.txt")
             .OrderBy(n => n, StringComparer.Ordinal).ToList();
         Assert.Equal(present, listed);
     }
