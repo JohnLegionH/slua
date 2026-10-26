@@ -197,8 +197,13 @@ SLUA_API int32_t slua_script_new(slua_vm* vm, const uint8_t* asset, size_t len, 
 SLUA_API int32_t slua_script_free(slua_script* s);
 // Loads the image's default state and stages the main function.
 SLUA_API int32_t slua_script_start(slua_script* s);
-// One scheduling step: serve sleep, then resume the in-flight handler, or run
-// the pending state_exit / state_entry. Returns SLUA_STEP_IDLE when none.
+// One scheduling step: resume the in-flight handler, or run the pending state_exit / state_entry.
+// Returns SLUA_STEP_IDLE when none. The result reports the delay the script asked for in the step
+// (sleep_served) and the CPU time the calling thread used during it (cpu_seconds: thread time from
+// GetThreadTimes on Windows, which the system counts in ticks of about 15 ms, and from
+// CLOCK_THREAD_CPUTIME_ID on Linux; 0 for an idle step or where the system gives none). Run
+// windows are measured in wall time; a scheduler that wants to tell a script that burns CPU from
+// one the system kept off the processor compares the two.
 SLUA_API int32_t slua_step(slua_script* s, double quanta_seconds, slua_step_result* result);
 // Index of an event by its LSL name ("touch_start"), or SLUA_ERR_BAD_ARG.
 SLUA_API int32_t slua_event_index(const char* name);

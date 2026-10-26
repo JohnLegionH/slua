@@ -42,8 +42,11 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#elif defined(__GLIBC__)
+#else
+#include <time.h>
+#if defined(__GLIBC__)
 #include <malloc.h>
+#endif
 #endif
 
 // The runtime part of the saved-state stamp: the pinned parent commit, or a hash of the parent
@@ -1057,6 +1060,30 @@ SLUA_API int32_t slua_script_start(slua_script* s)
 namespace
 {
 
+// CPU time the calling thread has used so far, in seconds; 0 where the system gives none. A step
+// reports the difference over its run, so a scheduler can tell a script that burns CPU from one
+// the operating system kept off the processor. Windows counts thread time in the scheduler's
+// ticks (about 15 ms); Linux reads it to the nanosecond.
+double threadCpuSeconds()
+{
+#if defined(_WIN32)
+    FILETIME created, exited, kernel, user;
+    if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user))
+        return 0.0;
+    ULARGE_INTEGER k, u;
+    k.LowPart = kernel.dwLowDateTime;
+    k.HighPart = kernel.dwHighDateTime;
+    u.LowPart = user.dwLowDateTime;
+    u.HighPart = user.dwHighDateTime;
+    return (double)(k.QuadPart + u.QuadPart) * 1e-7; // 100 ns units
+#else
+    timespec ts;
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0)
+        return 0.0;
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+#endif
+}
+
 // The delay the script is owed, which the step reports to the host and clears. A step takes it
 // twice: at the start, for a delay that was saved with the script, and at the end, for a delay the
 // script's own run asked for (a host function, or the runtime's punishment for a long run).
@@ -1095,6 +1122,7 @@ SLUA_API int32_t slua_step(slua_script* s, double quanta_seconds, slua_step_resu
     // reports how long they were.
     result->sleep_served = takeSleep(script);
 
+    const double cpuStart = threadCpuSeconds();
     RunResult rr;
     for (;;)
     {
@@ -1131,6 +1159,7 @@ SLUA_API int32_t slua_step(slua_script* s, double quanta_seconds, slua_step_resu
     result->new_state = rr.newState;
     result->fault_kind = (int32_t)script.getFaultKind();
     result->sleep_served += takeSleep(script);
+    result->cpu_seconds = std::max(0.0, threadCpuSeconds() - cpuStart);
     return SLUA_OK;
     SLUA_CATCH
 }
@@ -1205,6 +1234,7 @@ SLUA_API int32_t slua_dispatch_event(slua_script* s, int32_t event, const slua_v
     }
 
     EventArgs ea{args, nargs};
+    const double cpuStart = threadCpuSeconds();
     RunResult rr;
     {
         RunWindow window(script, quanta_seconds);
@@ -1214,6 +1244,7 @@ SLUA_API int32_t slua_dispatch_event(slua_script* s, int32_t event, const slua_v
     result->new_state = rr.newState;
     result->fault_kind = (int32_t)script.getFaultKind();
     result->sleep_served += takeSleep(script);
+    result->cpu_seconds = std::max(0.0, threadCpuSeconds() - cpuStart);
     return SLUA_OK;
     SLUA_CATCH
 }
