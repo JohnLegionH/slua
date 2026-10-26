@@ -110,7 +110,7 @@ public class NativePackageTests
         // The notes state the pin, the API version, the stamp format, the build's commit and the version.
         string notes = File.ReadAllText(Path.Combine(bundle, "RELEASE-NOTES.md"));
         Assert.Contains(Pin, notes);
-        Assert.Contains("API version: 3", notes);
+        Assert.Contains("API version: 4", notes);
         Assert.Contains("runtime=<pin> api=<n>", notes);
         Assert.Contains(Commit, notes);
         Assert.Contains(Version, notes);
