@@ -2,7 +2,7 @@
 # Licensed under the MIT License; see LICENSE.txt in the repository root.
 #
 # Builds and tests the ngc-host native library on Windows x64 and Linux x64 for every
-# push to a branch named ngc-host/..., and uploads the library with its notices. A third job
+# push to the branch ngc or a branch named ngc-host/..., and uploads the library with its notices. A third job
 # packs the NuGet package from the two libraries of the same run and uploads it.
 # Ubuntu 22.04 is used on purpose: a library built there loads on newer distributions.
 name: ngc-host
