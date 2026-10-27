@@ -65,7 +65,7 @@ library belongs to NGC itself; the `SluaHost` code here is for testing only.
 
 ## API version
 
-`slua_api_version()` returns `SLUA_API_VERSION` (currently 4). Changing or removing an export (its
+`slua_api_version()` returns `SLUA_API_VERSION` (currently 5). Changing or removing an export (its
 signature, the meaning of a result code, the layout of `slua_value` or `slua_step_result`) bumps it;
 adding an export does not. A host requires an exact match and checks it before calling anything
 else. `slua_struct_size` reports the library's `sizeof` for those two structs so a host can check its
@@ -89,7 +89,7 @@ version 3 and corrected for the LSL line must drop the correction.
 
 The C# test binding here refuses a library of another version: `Host.Init()` throws
 `ApiVersionMismatchException`, whose message names both numbers ("The SLua native library is API
-version 3; this host needs API version 4.").
+version 3; this host needs API version 5.").
 
 ## Threading rule
 

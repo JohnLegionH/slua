@@ -80,7 +80,7 @@ public static unsafe class Host
     public static readonly Value[] Yield = new Value[0];
 
     /// <summary>The API version of slua_shim.h this host was written for. <see cref="Init"/> refuses a library of any other version.</summary>
-    public const int RequiredApiVersion = 4;
+    public const int RequiredApiVersion = 5;
 
     /// <summary>Throws <see cref="ApiVersionMismatchException"/>, naming both versions, when <paramref name="library"/> is not <see cref="RequiredApiVersion"/>.</summary>
     internal static void VerifyApiVersion(int library)

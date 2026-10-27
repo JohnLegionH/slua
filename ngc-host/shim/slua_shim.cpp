@@ -20,6 +20,9 @@
 #include "Luau/ParseResult.h"
 #include "Luau/Script.h"
 
+#include <tailslide/allocator.hh>
+#include <tailslide/lslmini.hh>
+
 #include <algorithm>
 #include <atomic>
 #include <cfloat>
@@ -31,6 +34,8 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -748,12 +753,198 @@ SLUA_API int32_t slua_engine_name(char* buf, int32_t cap)
     SLUA_CATCH
 }
 
+// ---- Functions the host supplies for LSL (API 5) ----
+//
+// The LSL compiler looks every function up in one process-wide symbol table that holds the
+// runtime's own list (builtins.txt). The host's os*, iw* and bot* functions are defined in that
+// table, kept apart from the runtime's own symbols so the next list replaces them. A call the
+// compiler emits to one is a call to the host function registered as ossl.<Name>, iw.<Name> or
+// bot.<Name> (the prefix os, iw or bot is dropped); ll and llcompat stay the runtime's alone.
+
+namespace Tailslide
+{
+extern LSLSymbolTable gBuiltinsSymbolTable;
+}
+
+namespace
+{
+// Held shared by a compile and exclusive by slua_set_host_functions, so a list never changes under a compile.
+std::shared_mutex gHostFnMutex;
+Tailslide::ScriptAllocator gHostFnAllocator;
+std::vector<Tailslide::LSLSymbol*> gHostFnSymbols;
+
+struct HostFnSpec
+{
+    std::string name;
+    Tailslide::LSLIType ret = Tailslide::LST_NULL;
+    std::vector<std::pair<Tailslide::LSLIType, std::string>> params;
+};
+
+bool hostTypeFromName(const std::string& t, Tailslide::LSLIType& out, bool allowVoid)
+{
+    static const std::pair<const char*, Tailslide::LSLIType> kTypes[] = {
+        {"void", Tailslide::LST_NULL},
+        {"integer", Tailslide::LST_INTEGER},
+        {"float", Tailslide::LST_FLOATINGPOINT},
+        {"string", Tailslide::LST_STRING},
+        {"key", Tailslide::LST_KEY},
+        {"vector", Tailslide::LST_VECTOR},
+        {"rotation", Tailslide::LST_QUATERNION},
+        {"list", Tailslide::LST_LIST},
+    };
+    for (const auto& k : kTypes)
+    {
+        if (t == k.first)
+        {
+            if (k.second == Tailslide::LST_NULL && !allowVoid)
+                return false;
+            out = k.second;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool isIdentifier(const std::string& s)
+{
+    if (s.empty() || std::isdigit((unsigned char)s[0]))
+        return false;
+    for (char c : s)
+        if (!(std::isalnum((unsigned char)c) || c == '_'))
+            return false;
+    return true;
+}
+
+// os, iw or bot followed by a capital: the names a host may supply. Returns the length of the prefix, 0 for any other name.
+size_t hostPrefixLength(const std::string& name)
+{
+    size_t prefix = 0;
+    if (name.compare(0, 2, "os") == 0 || name.compare(0, 2, "iw") == 0)
+        prefix = 2;
+    else if (name.compare(0, 3, "bot") == 0)
+        prefix = 3;
+    if (prefix == 0 || name.size() <= prefix || !(name[prefix] >= 'A' && name[prefix] <= 'Z'))
+        return 0;
+    return prefix;
+}
+
+// `rettype name( type pname, type pname )`; false with why set when the line is not one.
+bool parseHostFunctionLine(const std::string& line, HostFnSpec& spec, std::string& why)
+{
+    const size_t open = line.find('(');
+    const size_t close = line.rfind(')');
+    if (open == std::string::npos || close == std::string::npos || close < open || line.find_first_not_of(" \t\r", close + 1) != std::string::npos)
+    {
+        why = "not of the form `type name( type name, ... )`";
+        return false;
+    }
+    std::istringstream head(line.substr(0, open));
+    std::string retName, extra;
+    head >> retName >> spec.name >> extra;
+    if (retName.empty() || spec.name.empty() || !extra.empty())
+    {
+        why = "not of the form `type name( type name, ... )`";
+        return false;
+    }
+    if (!hostTypeFromName(retName, spec.ret, true))
+    {
+        why = "unknown type `" + retName + "'";
+        return false;
+    }
+    if (!isIdentifier(spec.name) || hostPrefixLength(spec.name) == 0)
+    {
+        why = "`" + spec.name + "' is not a function the host may supply: its name starts with os, iw or bot and a capital letter";
+        return false;
+    }
+    std::string args = line.substr(open + 1, close - open - 1);
+    for (char& c : args)
+        if (c == ',')
+            c = ' ';
+    std::istringstream in(args);
+    std::string ptype, pname;
+    while (in >> ptype)
+    {
+        Tailslide::LSLIType t;
+        if (!hostTypeFromName(ptype, t, false))
+        {
+            why = "unknown parameter type `" + ptype + "'";
+            return false;
+        }
+        if (!(in >> pname) || !isIdentifier(pname))
+        {
+            why = "a parameter of type " + ptype + " has no name";
+            return false;
+        }
+        spec.params.emplace_back(t, pname);
+    }
+    return true;
+}
+} // namespace
+
 SLUA_API int32_t slua_set_host_functions(const char* definitions, char** err)
 {
     SLUA_TRY
-    (void)definitions;
     if (err != nullptr)
         *err = nullptr;
+    slua_init();
+
+    std::vector<HostFnSpec> specs;
+    if (definitions != nullptr)
+    {
+        std::istringstream lines{std::string(definitions)};
+        std::string line;
+        int lineNo = 0;
+        while (std::getline(lines, line))
+        {
+            ++lineNo;
+            const size_t first = line.find_first_not_of(" \t\r");
+            if (first == std::string::npos || line.compare(first, 2, "//") == 0)
+                continue;
+            HostFnSpec spec;
+            std::string why;
+            if (!parseHostFunctionLine(line, spec, why))
+            {
+                if (err != nullptr)
+                    *err = dupString("line " + std::to_string(lineNo) + ": " + line.substr(first) + ": " + why);
+                return SLUA_ERR_BAD_ARG;
+            }
+            for (const HostFnSpec& other : specs)
+            {
+                if (other.name == spec.name)
+                {
+                    if (err != nullptr)
+                        *err = dupString("line " + std::to_string(lineNo) + ": " + spec.name + " is listed twice");
+                    return SLUA_ERR_BAD_ARG;
+                }
+            }
+            specs.push_back(std::move(spec));
+        }
+    }
+
+    std::unique_lock<std::shared_mutex> lock(gHostFnMutex);
+    // The names the previous list defined are not the runtime's, so they do not count as taken.
+    for (Tailslide::LSLSymbol* old : gHostFnSymbols)
+        Tailslide::gBuiltinsSymbolTable.remove(old);
+    gHostFnSymbols.clear();
+    for (const HostFnSpec& spec : specs)
+    {
+        if (Tailslide::gBuiltinsSymbolTable.lookup(spec.name.c_str(), Tailslide::SYM_ANY) != nullptr)
+        {
+            for (Tailslide::LSLSymbol* done : gHostFnSymbols)
+                Tailslide::gBuiltinsSymbolTable.remove(done);
+            gHostFnSymbols.clear();
+            if (err != nullptr)
+                *err = dupString(spec.name + " is already defined by the runtime");
+            return SLUA_ERR_BAD_ARG;
+        }
+        auto* dec = gHostFnAllocator.newTracked<Tailslide::LSLFunctionDec>();
+        for (const auto& p : spec.params)
+            dec->pushChild(gHostFnAllocator.newTracked<Tailslide::LSLIdentifier>(Tailslide::LSLType::get(p.first), gHostFnAllocator.copyStr(p.second.c_str())));
+        auto* sym = gHostFnAllocator.newTracked<Tailslide::LSLSymbol>(
+            gHostFnAllocator.copyStr(spec.name.c_str()), Tailslide::LSLType::get(spec.ret), Tailslide::SYM_FUNCTION, Tailslide::SYM_BUILTIN, dec);
+        Tailslide::gBuiltinsSymbolTable.define(sym);
+        gHostFnSymbols.push_back(sym);
+    }
     return SLUA_OK;
     SLUA_CATCH
 }
@@ -764,6 +955,7 @@ SLUA_API int32_t slua_init(void)
     std::call_once(gInitOnce, []() {
         Luau::setRequiredSLuaFlags();
         luauSL_init_global_builtins(nullptr);
+        Tailslide::tailslide_init_builtins(nullptr);
         logCallback() = logAdapter;
     });
     return SLUA_OK;
@@ -804,6 +996,10 @@ SLUA_API int32_t slua_compile(const char* src, size_t len, int32_t is_lsl, uint8
 
     std::string source(src, len);
     std::string asset;
+    std::shared_lock<std::shared_mutex> hostFns(gHostFnMutex);
+    // A host that gave a list of its own functions gets ordinary errors, with lines, for a name it did not list;
+    // one that gave none gets the refusal that points at the engine for os*, iw* and bot* functions, as API 4 did.
+    const bool refuseUnlisted = gHostFnSymbols.empty();
     // Luau counts lines from 0, so SLua errors add 1. The LSL compiler's locations already count from 1.
     const int lineBase = is_lsl ? 0 : 1;
     try
@@ -829,7 +1025,7 @@ SLUA_API int32_t slua_compile(const char* src, size_t len, int32_t is_lsl, uint8
         for (const Luau::ParseError& pe : e.getErrors())
         {
             msg += std::to_string(pe.getLocation().begin.line + lineBase) + ": " + pe.what() + "\n";
-            if (is_lsl)
+            if (is_lsl && refuseUnlisted)
                 collectUndeclaredHostFunctions(pe.what(), osNames);
         }
         if (!osNames.empty())

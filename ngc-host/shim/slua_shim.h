@@ -29,6 +29,11 @@
 //      asks for (slua_add_sleep) is reported by the step that is running, not the next one, and a
 //      host function that asks for a delay and returns no values ends the script's turn. LSL
 //      compile errors report the line they are on (they were one too high).
+//   5  slua_set_host_functions (the host gives the LSL compiler the os*, iw* and bot* functions it
+//      supplies; a call to one is a call to ossl.<Name>, iw.<Name> or bot.<Name>, which the host
+//      registers as for SLua). The version moves because what a host must supply changed: with a list
+//      set, an unknown os*, iw* or bot* name fails to compile with its line (SLUA_ERR_COMPILE) where
+//      it was refused with SLUA_ERR_UNSUPPORTED_FUNCTION. A host that sets no list gets what 4 gave.
 //
 // Versioning rule: changing or removing an export bumps SLUA_API_VERSION. That means a change to
 // the signature of an export, to the meaning of a result code, or to the layout of slua_value or
@@ -64,7 +69,7 @@
 #define SLUA_ERR_UNSUPPORTED_FUNCTION (-10) // LSL source calls an os*, iw* or bot* function; *err names it
 
 // The API version this header describes; see the versioning rule above.
-#define SLUA_API_VERSION 4
+#define SLUA_API_VERSION 5
 
 // Highest memory limit a script can have. A host may lower a limit, never raise it past this.
 #define SLUA_MEMORY_LIMIT_MAX (128 * 1024)
@@ -167,8 +172,17 @@ SLUA_API int32_t slua_set_log(slua_log_fn fn);
 SLUA_API int32_t slua_set_engine_identity(const char* engine_name, const char* alt_engine_name, const char* alt_engine_header);
 // Copies the engine name set by slua_set_engine_identity (empty when none) into buf, cut to cap-1 bytes.
 SLUA_API int32_t slua_engine_name(char* buf, int32_t cap);
-// Gives the compiler the functions the host supplies for LSL (os*, iw* and bot* functions), one
-// per line in the form of the runtime's builtins.txt: `integer osAddOne( integer n )`.
+// Gives the LSL compiler the functions the host supplies (API 5): os*, iw* and bot* functions, one per
+// line in the form of the runtime's builtins.txt, for example `integer osAddOne( integer n )`. A name is
+// os, iw or bot and a capital letter, and is not one the runtime already has; ll and llcompat stay the
+// runtime's alone. The compiler then accepts a call to one as it accepts an ll call and emits a call to
+// the host function registered (slua_register_host_fn) as ossl.<Name>, iw.<Name> or bot.<Name>, the
+// prefix dropped; an SLua script calls the same function by that name. A name not in the list and not an
+// ll function fails to compile with its line. The list is process-wide and replaces the one before it;
+// NULL or empty removes it, and a host that never sets one gets the API 4 behaviour (the refusal
+// SLUA_ERR_UNSUPPORTED_FUNCTION for an os*, iw* or bot* call). A line that is refused leaves the
+// earlier list as it was and returns SLUA_ERR_BAD_ARG with the line and the reason in *err (released
+// with slua_free). Set it before compiling; a compile waits for a list being set.
 SLUA_API int32_t slua_set_host_functions(const char* definitions, char** err);
 SLUA_API int32_t slua_init(void);
 
