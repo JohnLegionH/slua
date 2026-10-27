@@ -18,6 +18,11 @@ every file in it is one release asset, and SHA256SUMS.txt lists exactly the othe
 The archives are written with fixed timestamps and owners, so the same libraries always give the
 same archive bytes. A library that does not carry the runtime commit from ngc-host/LL-RUNTIME-PIN
 is refused.
+
+RELEASE-NOTES.md is the generated text followed by the change list in ngc-host/release-notes/<version>.md
+(the folder named by SLUA_RELEASE_NOTES_DIR, for tests), read from the tree the tag points at, so the
+release page says what changed and not only what was built. A version without a dash needs the file and is
+refused without it; a version with a dash (a dry run or a test) may go without.
 """
 import gzip
 import hashlib
@@ -100,6 +105,14 @@ def main(argv):
                 info.external_attr = 0o644 << 16
                 z.writestr(info, read(os.path.join(linux, rel)))
 
+    notes_dir = os.environ.get("SLUA_RELEASE_NOTES_DIR") or os.path.join(repo, "ngc-host", "release-notes")
+    notes_file = os.path.join(notes_dir, version + ".md")
+    change_list = ""
+    if os.path.isfile(notes_file):
+        change_list = read(notes_file).decode("utf-8").strip() + "\n"
+    elif "-" not in version:
+        fail("no release notes for %s: add ngc-host/release-notes/%s.md with the change list (looked in %s)" % (version, version, notes_dir))
+
     notes = """# Release %(version)s
 
 Native library for hosting the SLua runtime: `slua_shim` for Windows x64 and Linux x64. The package
@@ -121,6 +134,8 @@ every other file in the release (check with `sha256sum -c SHA256SUMS.txt`).
 | `slua_shim.h` | the C interface |
 | `THIRD-PARTY-NOTICES.txt`, `licenses.zip` | licences of everything linked into the libraries |
 """ % dict(version=version, pin=pin, api=api, commit=commit)
+    if change_list:
+        notes += "\n" + change_list
     with open(os.path.join(out, "RELEASE-NOTES.md"), "w", newline="\n") as f:
         f.write(notes)
 

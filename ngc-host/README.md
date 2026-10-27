@@ -38,14 +38,32 @@ folder where the measurement tests append their results.
 ## Syncing with Linden Lab's runtime
 
 The parent tree must match the commit in `ngc-host/LL-RUNTIME-PIN`; configure stops otherwise (see
-"The build stamp"). To take a newer runtime, merge Linden Lab's tree into `ngc` and, in the same
-change, set `LL-RUNTIME-PIN` to the new commit. That change is made on its own, as a pin-bump, not
+"The build stamp"). The pin is Linden Lab's commit, except while a file of the parent tree is changed
+here: `Compiler/src/LSLCompiler.cpp` takes the module of a builtin call from its prefix, so a call to a
+host-supplied function goes to `ossl`, `iw` or `bot` (API 5). The pin then names the commit that carries
+that change, and it has to be a commit that stays in the history of `ngc` (a rebase or a squash would
+change its id). To take a newer runtime, merge Linden Lab's tree into `ngc`, carry the compiler change
+over, and, in the same change, set `LL-RUNTIME-PIN` to the new commit. That change is made on its own, as a pin-bump, not
 mixed with other work. It changes the runtime part of the build stamp, so scripts a host has saved
 start fresh once. The pin lives only in `LL-RUNTIME-PIN`.
 
+## Host-supplied functions
+
+LSL compiled by the runtime knows the `ll` functions. A host that supplies os, iw or bot functions
+gives the compiler their signatures with `slua_set_host_functions` (one line each, in the form of
+`builtins.txt`) and registers the functions as `ossl.<Name>`, `iw.<Name>` and `bot.<Name>` with
+`slua_register_host_fn`; the prefix `os`, `iw` or `bot` is dropped in the registered name. An LSL call
+to `osName(...)` then runs `ossl.Name`, and an SLua script calls the same function by that name. The
+list is process-wide, replaces the one before it and can be removed with NULL. A name that is neither
+in the list nor an `ll` function fails to compile with its line number. A host that sets no list gets
+the API 4 behaviour: a call to an os, iw or bot function is refused with the text that names the other
+engine. The list may name only `os`, `iw` and `bot` functions; `ll` and `llcompat` stay the runtime's.
+
 ## Releases
 
-Releases come only from CI. Pushing a tag `vX.Y.Z` on `ngc` makes the workflow build and test both
+Releases come only from CI. The change list of a release is the file `ngc-host/release-notes/<version>.md`
+at the tag; `make-bundle.py` adds it to the generated release notes, and refuses a version without a dash
+that has no such file. Pushing a tag `vX.Y.Z` on `ngc` makes the workflow build and test both
 libraries and publish a GitHub release; every file in the release comes from that run's builds:
 
 - `slua-native-win-x64-X.Y.Z.zip` (`slua_shim.dll`) and `slua-native-linux-x64-X.Y.Z.tar.gz`
