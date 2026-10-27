@@ -202,7 +202,7 @@ public sealed class ApiV5HostOverloadTests : IDisposable
 
         string text = CompileError(Body("rotation r = osMix(<1,2,3>, <4,5,6>, 0.5);"), out int code);
         Assert.Equal(-5, code);
-        Assert.Contains("rotation", text);
+        Assert.Contains("assigned a vector value", text);
         CompileError(Body("vector v = osMix(<1,2,3,4>, <1,2,3,4>, 0.5);"), out code);
         Assert.Equal(-5, code);
     }

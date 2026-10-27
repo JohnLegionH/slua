@@ -92,6 +92,14 @@ class LSLSymbol: public TrackableObject {
     int getEventIndex() const { return _mEventIndex; }
     void setEventIndex(int event_index) { _mEventIndex = event_index; }
 
+    // Added by Legion Builds (ngc-host, API 5): a function the host supplies may have several signatures under one name.
+    // The symbol table holds the first; the others follow it through this pointer, in the order the host listed them.
+    LSLSymbol *getNextOverload() { return _mNextOverload; }
+    void setNextOverload(LSLSymbol *next) { _mNextOverload = next; }
+    // The first signature of the name, set on every signature of a name that has several (null for a name with one).
+    LSLSymbol *getOverloadHead() { return _mOverloadHead; }
+    void setOverloadHead(LSLSymbol *head) { _mOverloadHead = head; }
+
   private:
     const char          *_mName;
     class LSLType  *_mType;
@@ -112,6 +120,8 @@ class LSLSymbol: public TrackableObject {
     // if the function contains jumps that are not break-like or continue-like
     bool _mHasUnstructuredJumps = false;
     int _mEventIndex = 0;
+    LSLSymbol *_mNextOverload = nullptr;
+    LSLSymbol *_mOverloadHead = nullptr;
 };
 
 class LSLSymbolTable: public TrackableObject {

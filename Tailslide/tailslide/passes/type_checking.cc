@@ -312,6 +312,92 @@ static bool validate_func_arg_spec(
   return true;
 }
 
+// Added by Legion Builds (ngc-host, API 5): a function the host supplies may have several signatures under one name (they are
+// chained from the symbol the table holds). The call takes the one the Phlox script engine's compiler would take: only
+// signatures with the call's number of arguments are candidates; an argument scores 2 when its type is the parameter's and
+// 1 when LSL converts it implicitly (integer to float, key and string either way); a signature an argument cannot reach is
+// out; the best total wins. An argument of unknown type (one that already has an error) fits anything and scores nothing.
+static bool overloadWidens(LSLIType from, LSLIType to) {
+  return (from == LST_INTEGER && to == LST_FLOATINGPOINT)
+      || (from == LST_KEY && to == LST_STRING)
+      || (from == LST_STRING && to == LST_KEY);
+}
+
+static const char *overloadTypeName(LSLIType t) {
+  switch (t) {
+    case LST_INTEGER: return "integer";
+    case LST_FLOATINGPOINT: return "float";
+    case LST_STRING: return "string";
+    case LST_KEY: return "key";
+    case LST_VECTOR: return "vector";
+    case LST_QUATERNION: return "rotation";
+    case LST_LIST: return "list";
+    default: return "void";
+  }
+}
+
+static std::string describeOverload(LSLSymbol *sym) {
+  std::string out = std::string(sym->getName()) + "(";
+  auto *decl = sym->getFunctionDecl();
+  for (int i = 0; decl != nullptr && i < decl->getNumChildren(); ++i) {
+    if (i > 0)
+      out += ", ";
+    out += overloadTypeName(decl->getChild(i)->getType()->getIType());
+  }
+  return out + ")";
+}
+
+// Returns the signature the call takes. With no candidate it returns the first signature of the call's number of arguments,
+// or the first signature, so that the ordinary argument errors name the function. A tie sets tied_with.
+static LSLSymbol *selectHostOverload(LSLSymbol *head, LSLASTNode *args, LSLSymbol **tied_with) {
+  *tied_with = nullptr;
+  int arg_count = args->getNumChildren();
+  int known = 0;
+  for (int i = 0; i < arg_count; ++i)
+    if (((LSLExpression *)args->getChild(i))->getIType() != LST_ERROR)
+      ++known;
+
+  LSLSymbol *best = nullptr, *tie = nullptr, *same_length = nullptr;
+  int best_score = -1;
+  for (LSLSymbol *sig = head; sig != nullptr; sig = sig->getNextOverload()) {
+    auto *decl = sig->getFunctionDecl();
+    if ((decl ? decl->getNumChildren() : 0) != arg_count)
+      continue;
+    if (same_length == nullptr)
+      same_length = sig;
+    if (known == 0)
+      return sig;
+    int score = 0;
+    bool viable = true;
+    for (int i = 0; i < arg_count && viable; ++i) {
+      LSLIType given = ((LSLExpression *)args->getChild(i))->getIType();
+      if (given == LST_ERROR)
+        continue;
+      LSLIType wanted = decl->getChild(i)->getType()->getIType();
+      if (given == wanted)
+        score += 2;
+      else if (overloadWidens(given, wanted))
+        score += 1;
+      else
+        viable = false;
+    }
+    if (!viable)
+      continue;
+    if (score > best_score) {
+      best = sig;
+      best_score = score;
+      tie = nullptr;
+    } else if (score == best_score) {
+      tie = sig;
+    }
+  }
+  if (best != nullptr && tie != nullptr)
+    *tied_with = tie;
+  if (best != nullptr)
+    return best;
+  return same_length != nullptr ? same_length : head;
+}
+
 bool TypeCheckVisitor::visit(LSLFunctionExpression *func_expr) {
   auto *id = func_expr->getIdentifier();
   auto *sym = func_expr->getSymbol();
@@ -321,6 +407,24 @@ bool TypeCheckVisitor::visit(LSLFunctionExpression *func_expr) {
   if (sym == nullptr) {
     func_expr->setType(TYPE(LST_ERROR));
     return true;
+  }
+
+  // Added by Legion Builds (ngc-host, API 5): pick among the signatures of a host function, now that the arguments have
+  // their types, and let the call (its symbol, its result type, the conversions of its arguments) follow the one picked.
+  if (sym->getOverloadHead() != nullptr) {
+    LSLSymbol *tied_with = nullptr;
+    LSLSymbol *chosen = selectHostOverload(sym->getOverloadHead(), func_expr->getArguments(), &tied_with);
+    if (chosen != sym) {
+      id->setSymbol(chosen);
+      id->setType(chosen->getType());
+      func_expr->setType(chosen->getType());
+      sym = chosen;
+    }
+    if (tied_with != nullptr) {
+      NODE_ERROR(func_expr, E_AMBIGUOUS_OVERLOAD, id->getName(), describeOverload(chosen).c_str(), describeOverload(tied_with).c_str());
+      func_expr->setType(TYPE(LST_ERROR));
+      return true;
+    }
   }
 
   validate_func_arg_spec(id, func_expr, func_expr->getArguments(), sym->getFunctionDecl());

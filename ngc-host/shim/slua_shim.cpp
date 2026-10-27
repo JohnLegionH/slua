@@ -828,6 +828,17 @@ size_t hostPrefixLength(const std::string& name)
     return prefix;
 }
 
+// True when two lines list the same name with the same parameter types, in order (the result type and the parameter names do not count).
+bool sameParameterTypes(const HostFnSpec& a, const HostFnSpec& b)
+{
+    if (a.params.size() != b.params.size())
+        return false;
+    for (size_t i = 0; i < a.params.size(); ++i)
+        if (a.params[i].first != b.params[i].first)
+            return false;
+    return true;
+}
+
 // `rettype name( type pname, type pname )`; false with why set when the line is not one.
 bool parseHostFunctionLine(const std::string& line, HostFnSpec& spec, std::string& why)
 {
@@ -910,7 +921,8 @@ SLUA_API int32_t slua_set_host_functions(const char* definitions, char** err)
             }
             for (const HostFnSpec& other : specs)
             {
-                if (other.name == spec.name)
+                // A name may be listed again with other parameter types (an overload); the same parameter types twice is a mistake.
+                if (other.name == spec.name && sameParameterTypes(other, spec))
                 {
                     if (err != nullptr)
                         *err = dupString("line " + std::to_string(lineNo) + ": " + spec.name + " is listed twice");
@@ -926,23 +938,38 @@ SLUA_API int32_t slua_set_host_functions(const char* definitions, char** err)
     for (Tailslide::LSLSymbol* old : gHostFnSymbols)
         Tailslide::gBuiltinsSymbolTable.remove(old);
     gHostFnSymbols.clear();
+    // Every name is checked against the runtime's own before anything is defined, so a refused list defines nothing.
     for (const HostFnSpec& spec : specs)
     {
         if (Tailslide::gBuiltinsSymbolTable.lookup(spec.name.c_str(), Tailslide::SYM_ANY) != nullptr)
         {
-            for (Tailslide::LSLSymbol* done : gHostFnSymbols)
-                Tailslide::gBuiltinsSymbolTable.remove(done);
-            gHostFnSymbols.clear();
             if (err != nullptr)
                 *err = dupString(spec.name + " is already defined by the runtime");
             return SLUA_ERR_BAD_ARG;
         }
+    }
+    std::map<std::string, Tailslide::LSLSymbol*> lastOfName;
+    for (const HostFnSpec& spec : specs)
+    {
         auto* dec = gHostFnAllocator.newTracked<Tailslide::LSLFunctionDec>();
         for (const auto& p : spec.params)
             dec->pushChild(gHostFnAllocator.newTracked<Tailslide::LSLIdentifier>(Tailslide::LSLType::get(p.first), gHostFnAllocator.copyStr(p.second.c_str())));
         auto* sym = gHostFnAllocator.newTracked<Tailslide::LSLSymbol>(
             gHostFnAllocator.copyStr(spec.name.c_str()), Tailslide::LSLType::get(spec.ret), Tailslide::SYM_FUNCTION, Tailslide::SYM_BUILTIN, dec);
-        Tailslide::gBuiltinsSymbolTable.define(sym);
+        auto previous = lastOfName.find(spec.name);
+        if (previous == lastOfName.end())
+        {
+            Tailslide::gBuiltinsSymbolTable.define(sym);
+        }
+        else
+        {
+            // Another signature of a name already defined: it follows the first through the chain the type check walks.
+            Tailslide::LSLSymbol* head = previous->second->getOverloadHead() ? previous->second->getOverloadHead() : previous->second;
+            head->setOverloadHead(head);
+            sym->setOverloadHead(head);
+            previous->second->setNextOverload(sym);
+        }
+        lastOfName[spec.name] = sym;
         gHostFnSymbols.push_back(sym);
     }
     return SLUA_OK;

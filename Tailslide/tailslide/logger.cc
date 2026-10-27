@@ -210,7 +210,8 @@ const char *Logger::_sErrorMessages[E_LAST - E_ERROR] = {
         "Lists may not contain nulls",
         "Stack-heap collision",
         "Void expression used as condition",
-        "Nesting too deep."
+        "Nesting too deep.",
+        "Call to `%s' is ambiguous: `%s' and `%s' fit the arguments equally well."
 };
 
 const char *Logger::_sWarningMessages[W_LAST - W_WARNING] = {
