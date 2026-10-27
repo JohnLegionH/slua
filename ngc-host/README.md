@@ -59,6 +59,17 @@ in the list nor an `ll` function fails to compile with its line number. A host t
 the API 4 behaviour: a call to an os, iw or bot function is refused with the text that names the other
 engine. The list may name only `os`, `iw` and `bot` functions; `ll` and `llcompat` stay the runtime's.
 
+One name may be listed more than once with different parameter types (the same parameter types twice
+is refused), and each line may have its own result type. All of them are the one host function
+`ossl.Name`, which receives the arguments of the signature that was picked and tells them apart by
+their count and types. An LSL call picks among the signatures of its name as the Phlox compiler does:
+only signatures with the call's number of arguments are candidates; an argument scores 2 when its
+type is the parameter's and 1 when LSL converts it implicitly (integer to float, key to string, string
+to key), and a signature that an argument cannot reach is out; the best total wins. A tie is a compile
+error that names the function and both signatures, and a call that no signature takes gets the usual
+argument errors for the function. An argument that already has an error matches anything and scores
+nothing.
+
 ## Releases
 
 Releases come only from CI. The change list of a release is the file `ngc-host/release-notes/<version>.md`

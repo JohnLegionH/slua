@@ -178,7 +178,13 @@ SLUA_API int32_t slua_engine_name(char* buf, int32_t cap);
 // runtime's alone. The compiler then accepts a call to one as it accepts an ll call and emits a call to
 // the host function registered (slua_register_host_fn) as ossl.<Name>, iw.<Name> or bot.<Name>, the
 // prefix dropped; an SLua script calls the same function by that name. A name not in the list and not an
-// ll function fails to compile with its line. The list is process-wide and replaces the one before it;
+// ll function fails to compile with its line. A name may be listed more than once with different
+// parameter types (the same parameter types twice is refused), each with its own result type; an LSL
+// call picks among the signatures of its name like the Phlox compiler: only signatures with the call's
+// number of arguments count, an argument scores 2 for the parameter's own type and 1 for an implicit
+// conversion (integer to float, key to string, string to key), a signature an argument cannot reach is
+// out, and the best total wins; a tie is SLUA_ERR_COMPILE naming the function and both signatures.
+// All signatures of a name are the one host function. The list is process-wide and replaces the one before it;
 // NULL or empty removes it, and a host that never sets one gets the API 4 behaviour (the refusal
 // SLUA_ERR_UNSUPPORTED_FUNCTION for an os*, iw* or bot* call). A line that is refused leaves the
 // earlier list as it was and returns SLUA_ERR_BAD_ARG with the line and the reason in *err (released
