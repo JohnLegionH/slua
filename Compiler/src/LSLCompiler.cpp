@@ -21,6 +21,24 @@ constexpr uint32_t kMaxStringImportRef = 1024;
 // Masks are 64 bits wide, so an event index past this can't be represented
 constexpr int kMaxEventIndex = 64;
 
+// Added by Legion Builds (ngc-host, API 5): a builtin function the host supplies (os*, iw*, bot*) is called through its
+// own module, ossl, iw or bot, with the prefix dropped, where the runtime's own functions are called through ll.
+static const char* builtinModuleOf(const std::string& name)
+{
+    if (name.compare(0, 2, "os") == 0)
+        return "ossl";
+    if (name.compare(0, 2, "iw") == 0)
+        return "iw";
+    if (name.compare(0, 3, "bot") == 0)
+        return "bot";
+    return "ll";
+}
+
+static size_t builtinPrefixLengthOf(const std::string& name)
+{
+    return name.compare(0, 3, "bot") == 0 ? 3 : 2;
+}
+
 static Luau::Location convertLoc(TailslideLType *loc)
 {
     if (loc == nullptr)
@@ -1715,8 +1733,9 @@ bool LuauVisitor::visit(LSLFunctionExpression *func_expr)
     {
         // Chop off the leading `ll`, It's superfluous because these
         // functions will all live in the `ll` module.
+        // (A function the host supplies lives in the ossl, iw or bot module instead.)
         nodeSymIdToConstant(func_expr);
-        pushImport(func_reg, "ll", _mSymbolNames[func_sym].c_str());
+        pushImport(func_reg, builtinModuleOf(func_sym->getName()), _mSymbolNames[func_sym].c_str());
     }
     else
     {
@@ -2086,8 +2105,9 @@ int16_t LuauVisitor::nodeSymIdToConstant(LSLASTNode* node, bool string_only)
         {
             // Chop off the leading `ll`, It's superfluous because these
             // functions will all live in the `ll` module.
-            LUAU_ASSERT(name.find("ll") == 0);
-            name = name.substr(2);
+            // (For a function the host supplies, the leading `os`, `iw` or `bot`.)
+            LUAU_ASSERT(name.find("ll") == 0 || std::string(builtinModuleOf(name)) != "ll");
+            name = name.substr(builtinPrefixLengthOf(name));
         }
         else
         {
