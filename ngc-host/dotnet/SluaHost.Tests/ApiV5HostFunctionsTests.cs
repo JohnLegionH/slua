@@ -36,6 +36,20 @@ public sealed class ApiV5HostFunctionsTests : IDisposable
         return rig;
     }
 
+    // A compile that is expected to work fails the test with the compiler's message, so a refusal is an assertion failure.
+    static byte[] Compiled(string source, bool lsl)
+    {
+        try { return Host.Compile(source, lsl); }
+        catch (SluaException e) { Assert.Fail("did not compile: " + e.Message); throw; }
+    }
+
+    static Script RunCompiled(V4Rig rig, string source, bool lsl = false, long tag = 1)
+    {
+        var s = rig.Fresh(Compiled(source, lsl), tag);
+        s.Start();
+        return s;
+    }
+
     static string CompileError(string source, bool lsl, out int code)
     {
         var e = Assert.Throws<SluaException>(() => Host.Compile(source, lsl));
@@ -60,7 +74,7 @@ public sealed class ApiV5HostFunctionsTests : IDisposable
     {
         Host.SetHostFunctions(AddOne);
         using var rig = RigWithHostFunctions();
-        using var s = rig.Run("default { state_entry() { llOwnerSay((string)osAddOne(41)); } }", lsl: true);
+        using var s = RunCompiled(rig, "default { state_entry() { llOwnerSay((string)osAddOne(41)); } }", lsl: true);
 
         rig.StepUntilLines(s, l => l.Contains("OwnerSay str:42"));
     }
@@ -70,11 +84,11 @@ public sealed class ApiV5HostFunctionsTests : IDisposable
     {
         Host.SetHostFunctions("integer osAddOne( integer n )\ninteger iwTwice( integer n )\nstring botHello( string who )");
         using var rig = RigWithHostFunctions();
-        using var s = rig.Run("default { state_entry() { llOwnerSay((string)osAddOne(1) + \" \" + (string)iwTwice(21) + \" \" + botHello(\"x\")); } }", lsl: true);
+        using var s = RunCompiled(rig, "default { state_entry() { llOwnerSay((string)osAddOne(1) + \" \" + (string)iwTwice(21) + \" \" + botHello(\"x\")); } }", lsl: true);
 
         rig.StepUntilLines(s, l => l.Contains("OwnerSay str:2 42 hello x"));
 
-        string asset = Encoding.Latin1.GetString(Host.Compile("default { state_entry() { llOwnerSay((string)osAddOne(1)); } }", true));
+        string asset = Encoding.Latin1.GetString(Compiled("default { state_entry() { llOwnerSay((string)osAddOne(1)); } }", true));
         Assert.Contains("ossl", asset);
         Assert.Contains("AddOne", asset);
         Assert.DoesNotContain("osAddOne", asset);
@@ -88,7 +102,7 @@ public sealed class ApiV5HostFunctionsTests : IDisposable
             "void osNote( string s, list l, vector v, rotation r, key k, float f, integer i )",
             "integer osInt(  )", "float osFloat(  )", "string osStr(  )", "key osKey(  )",
             "vector osVec(  )", "rotation osRot(  )", "list osList(  )"));
-        Assert.NotEmpty(Host.Compile("""
+        Assert.NotEmpty(Compiled("""
             default
             {
                 state_entry()
@@ -151,7 +165,7 @@ public sealed class ApiV5HostFunctionsTests : IDisposable
 
         Assert.Equal(-3, e.Code);
         Assert.Contains(named, e.Message);
-        Assert.NotEmpty(Host.Compile("default { state_entry() { llOwnerSay((string)osAddOne(1)); } }", true));   // the earlier list stands
+        Assert.NotEmpty(Compiled("default { state_entry() { llOwnerSay((string)osAddOne(1)); } }", true));   // the earlier list stands
     }
 
     [Fact]
@@ -165,12 +179,12 @@ public sealed class ApiV5HostFunctionsTests : IDisposable
     public void List_ANewListReplacesTheOldAndNullGivesBackWhatApi4Gave()
     {
         Host.SetHostFunctions(AddOne);
-        Assert.NotEmpty(Host.Compile("default { state_entry() { llOwnerSay((string)osAddOne(1)); } }", true));
+        Assert.NotEmpty(Compiled("default { state_entry() { llOwnerSay((string)osAddOne(1)); } }", true));
 
         Host.SetHostFunctions("integer iwTwice( integer n )");
         CompileError("default { state_entry() { llOwnerSay((string)osAddOne(1)); } }", true, out int code);
         Assert.Equal(-5, code);
-        Assert.NotEmpty(Host.Compile("default { state_entry() { llOwnerSay((string)iwTwice(1)); } }", true));
+        Assert.NotEmpty(Compiled("default { state_entry() { llOwnerSay((string)iwTwice(1)); } }", true));
 
         Host.SetHostFunctions(null);
         CompileError("default { state_entry() { llOwnerSay((string)iwTwice(1)); } }", true, out code);
@@ -197,12 +211,12 @@ public sealed class ApiV5HostFunctionsTests : IDisposable
         const string lsl = "default { state_entry() { llOwnerSay(\"hi \" + (string)llGetUnixTime()); } touch_start(integer n) { llSay(0, \"t\"); } }";
         const string slua = "LLEvents:on('touch_start', function() ossl.Nop() end) ll.OwnerSay('x')";
         Host.SetHostFunctions(null);
-        byte[] lslBefore = Host.Compile(lsl, true), sluaBefore = Host.Compile(slua, false);
+        byte[] lslBefore = Compiled(lsl, true), sluaBefore = Compiled(slua, false);
 
         Host.SetHostFunctions(AddOne + "\ninteger iwTwice( integer n )\nstring botHello( string who )");
 
-        Assert.Equal(lslBefore, Host.Compile(lsl, true));
-        Assert.Equal(sluaBefore, Host.Compile(slua, false));
+        Assert.Equal(lslBefore, Compiled(lsl, true));
+        Assert.Equal(sluaBefore, Compiled(slua, false));
     }
 
     // ---- SLua: the same functions by their namespaces ----
@@ -211,7 +225,7 @@ public sealed class ApiV5HostFunctionsTests : IDisposable
     public void Slua_ASCriptCallsOssl_Iw_AndBotFunctionsTheHostRegistered()
     {
         using var rig = RigWithHostFunctions();
-        using var s = rig.Run("ll.OwnerSay(tostring(ossl.AddOne(1)) .. ' ' .. tostring(iw.Twice(21)) .. ' ' .. bot.Hello('x'))");
+        using var s = RunCompiled(rig, "ll.OwnerSay(tostring(ossl.AddOne(1)) .. ' ' .. tostring(iw.Twice(21)) .. ' ' .. bot.Hello('x'))");
 
         rig.StepUntilLines(s, l => l.Contains("OwnerSay str:2 42 hello x"));
     }
@@ -221,8 +235,8 @@ public sealed class ApiV5HostFunctionsTests : IDisposable
     {
         Host.SetHostFunctions(AddOne);
         using var rig = RigWithHostFunctions();
-        using var slua = rig.Run("ll.OwnerSay('slua ' .. tostring(ossl.AddOne(9)))", tag: 1);
-        using var lsl = rig.Run("default { state_entry() { llOwnerSay(\"lsl \" + (string)osAddOne(9)); } }", lsl: true, tag: 2);
+        using var slua = RunCompiled(rig, "ll.OwnerSay('slua ' .. tostring(ossl.AddOne(9)))", tag: 1);
+        using var lsl = RunCompiled(rig, "default { state_entry() { llOwnerSay(\"lsl \" + (string)osAddOne(9)); } }", lsl: true, tag: 2);
 
         rig.StepUntilLines(slua, l => l.Contains("OwnerSay str:slua 10"));
         rig.StepUntilLines(lsl, l => l.Contains("OwnerSay str:lsl 10"));
