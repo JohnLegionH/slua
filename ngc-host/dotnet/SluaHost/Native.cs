@@ -82,6 +82,7 @@ internal static unsafe class Native
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_init();
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_set_engine_identity([MarshalAs(UnmanagedType.LPUTF8Str)] string? engine, [MarshalAs(UnmanagedType.LPUTF8Str)] string? altEngine, [MarshalAs(UnmanagedType.LPUTF8Str)] string? altHeader);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_engine_name(byte* buf, int cap);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_set_host_functions([MarshalAs(UnmanagedType.LPUTF8Str)] string? definitions, byte** err);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_api_version();
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_timer_interval(IntPtr s, double* seconds);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int slua_struct_size(int which);

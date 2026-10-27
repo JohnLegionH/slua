@@ -167,6 +167,9 @@ SLUA_API int32_t slua_set_log(slua_log_fn fn);
 SLUA_API int32_t slua_set_engine_identity(const char* engine_name, const char* alt_engine_name, const char* alt_engine_header);
 // Copies the engine name set by slua_set_engine_identity (empty when none) into buf, cut to cap-1 bytes.
 SLUA_API int32_t slua_engine_name(char* buf, int32_t cap);
+// Gives the compiler the functions the host supplies for LSL (os*, iw* and bot* functions), one
+// per line in the form of the runtime's builtins.txt: `integer osAddOne( integer n )`.
+SLUA_API int32_t slua_set_host_functions(const char* definitions, char** err);
 SLUA_API int32_t slua_init(void);
 
 // Compiles source to an asset (header plus bytecode). *out and *err are

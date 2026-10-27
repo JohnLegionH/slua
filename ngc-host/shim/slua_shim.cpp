@@ -748,6 +748,16 @@ SLUA_API int32_t slua_engine_name(char* buf, int32_t cap)
     SLUA_CATCH
 }
 
+SLUA_API int32_t slua_set_host_functions(const char* definitions, char** err)
+{
+    SLUA_TRY
+    (void)definitions;
+    if (err != nullptr)
+        *err = nullptr;
+    return SLUA_OK;
+    SLUA_CATCH
+}
+
 SLUA_API int32_t slua_init(void)
 {
     SLUA_TRY
