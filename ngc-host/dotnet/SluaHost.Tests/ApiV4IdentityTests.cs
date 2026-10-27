@@ -15,24 +15,24 @@ public class ApiV4IdentityTests
     // ---- The version check ----
 
     [Fact]
-    public void ApiVersion_TheLibraryAndTheHostAreVersionFour()
+    public void ApiVersion_TheLibraryAndTheHostAreVersionFive()
     {
-        Assert.Equal(4, Host.ApiVersion());
-        Assert.Equal(4, Host.RequiredApiVersion);
-        Assert.Contains("api=4", Host.Version());
+        Assert.Equal(5, Host.ApiVersion());
+        Assert.Equal(5, Host.RequiredApiVersion);
+        Assert.Contains("api=5", Host.Version());
     }
 
     [Theory]
     [InlineData(1)]
     [InlineData(3)]
-    [InlineData(5)]
+    [InlineData(4)]
     public void ApiVersion_AMismatchNamesBothNumbers(int library)
     {
         var e = Assert.Throws<ApiVersionMismatchException>(() => Host.VerifyApiVersion(library));
         Assert.Contains($"API version {library}", e.Message);
-        Assert.Contains("API version 4", e.Message);
+        Assert.Contains("API version 5", e.Message);
         Assert.Equal(library, e.LibraryVersion);
-        Assert.Equal(4, e.RequiredVersion);
+        Assert.Equal(5, e.RequiredVersion);
     }
 
     [Fact]
@@ -46,7 +46,7 @@ public class ApiV4IdentityTests
     {
         var e = Assert.Throws<ApiVersionMismatchException>(() => Host.InitWith(() => 3));
         Assert.Contains("API version 3", e.Message);
-        Assert.Contains("API version 4", e.Message);
+        Assert.Contains("API version 5", e.Message);
         Host.InitWith(() => Host.RequiredApiVersion);
     }
 

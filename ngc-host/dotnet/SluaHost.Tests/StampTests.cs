@@ -185,7 +185,7 @@ public class StampTests
         // Header: "SLSH", u32 format, u16 stamp length, the stamp text ("runtime=... api=N"), u64 function hash.
         int len = BitConverter.ToUInt16(state, 8);
         string stamp = Encoding.ASCII.GetString(state, 10, len);
-        int at = stamp.IndexOf("api=4", StringComparison.Ordinal);
+        int at = stamp.IndexOf("api=5", StringComparison.Ordinal);
         Assert.True(at >= 0, "stamp text was: " + stamp);
         state[10 + at + 4] = (byte)'2';
 

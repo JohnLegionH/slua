@@ -92,10 +92,10 @@ public class ApiV3Tests
     // ---- The version ----
 
     [Fact]
-    public void V3_ApiVersionIsFour() => Assert.Equal(4, Host.ApiVersion());
+    public void V3_ApiVersionIsFive() => Assert.Equal(5, Host.ApiVersion());
 
     [Fact]
-    public void V3_VersionTextCarriesTheApiVersion() => Assert.Contains("api=4", Host.Version());
+    public void V3_VersionTextCarriesTheApiVersion() => Assert.Contains("api=5", Host.Version());
 
     // ---- A: a host function asks for a delay ----
 
