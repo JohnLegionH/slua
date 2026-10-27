@@ -33,10 +33,14 @@ public class NativePackageTests
         throw new InvalidOperationException("repository root not found from " + here);
     }
 
-    static (int Code, string Output) Run(string exe, string dir, params string[] args)
+    static (int Code, string Output) Run(string exe, string dir, params string[] args) => RunWith(null, exe, dir, args);
+
+    static (int Code, string Output) RunWith(Dictionary<string, string>? env, string exe, string dir, params string[] args)
     {
         var psi = new ProcessStartInfo(exe) { WorkingDirectory = dir, RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (var a in args) psi.ArgumentList.Add(a);
+        if (env != null)
+            foreach (var kv in env) psi.Environment[kv.Key] = kv.Value;
         using var p = Process.Start(psi)!;
         var err = p.StandardError.ReadToEndAsync();
         string o = p.StandardOutput.ReadToEnd();
@@ -68,6 +72,20 @@ public class NativePackageTests
             RepoRoot, Version, Commit, win, linux, bundle);
         Assert.True(code == 0, "make-bundle.py failed: " + o);
         return bundle;
+    }
+
+    // make-bundle.py with a folder of release notes (SLUA_RELEASE_NOTES_DIR), for a version of the caller's choosing.
+    (int Code, string Output, string Bundle) MakeBundleWithNotes(string version, string? notesText)
+    {
+        string win = BuildOutput("win", "slua_shim.dll", "stand-in win library " + Pin);
+        string linux = BuildOutput("linux", "libslua_shim.so", "stand-in linux library " + Pin);
+        string bundle = Path.Combine(work, "bundle-" + version);
+        string notes = Path.Combine(work, "notes");
+        Directory.CreateDirectory(notes);
+        if (notesText != null) File.WriteAllText(Path.Combine(notes, version + ".md"), notesText);
+        var (code, o) = RunWith(new() { ["SLUA_RELEASE_NOTES_DIR"] = notes }, Python(), RepoRoot, "-I",
+            Path.Combine(RepoRoot, "ngc-host", "scripts", "make-bundle.py"), RepoRoot, version, Commit, win, linux, bundle);
+        return (code, o, bundle);
     }
 
     static string Sha256(string path) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
@@ -154,6 +172,48 @@ public class NativePackageTests
         Assert.Contains("libslua_shim.so", o);
         Assert.Contains("LL-RUNTIME-PIN", o);
         Assert.False(File.Exists(Path.Combine(bundle, "SHA256SUMS.txt")));
+    }
+
+    [Fact]
+    public void N1_TheChangeListFromTheNotesFileAtTheTagIsInTheReleaseNotes()
+    {
+        const string list = "## What changed since 0.2.0\n\n1. A change the generated text could not know.\n";
+        var (code, o, bundle) = MakeBundleWithNotes("4.5.6", list);
+        Assert.True(code == 0, "make-bundle.py failed: " + o);
+
+        string notes = File.ReadAllText(Path.Combine(bundle, "RELEASE-NOTES.md"));
+        Assert.Contains("# Release 4.5.6", notes);                          // the generated part stays
+        Assert.Contains("API version: ", notes);
+        Assert.Contains("1. A change the generated text could not know.", notes);   // the notes file is added
+        Assert.True(notes.IndexOf("API version: ", StringComparison.Ordinal) < notes.IndexOf("What changed since 0.2.0", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void N2_ARealVersionWithNoNotesFileIsRefusedAndNothingIsWritten()
+    {
+        var (code, o, bundle) = MakeBundleWithNotes("4.5.7", null);
+        Assert.NotEqual(0, code);
+        Assert.Contains("4.5.7.md", o);
+        Assert.Contains("release-notes", o);
+        Assert.False(File.Exists(Path.Combine(bundle, "SHA256SUMS.txt")));
+    }
+
+    [Fact]
+    public void N3_ATestOrDryRunVersionWithADashNeedsNoNotesFile()
+    {
+        var (code, o, bundle) = MakeBundleWithNotes("4.5.8-dryrun", null);
+        Assert.True(code == 0, "make-bundle.py failed: " + o);
+        Assert.DoesNotContain("What changed", File.ReadAllText(Path.Combine(bundle, "RELEASE-NOTES.md")));
+    }
+
+    [Fact]
+    public void N4_TheRepositoryHasANotesFileForTheNextReleaseAndItNamesTheApiVersion()
+    {
+        string file = Path.Combine(RepoRoot, "ngc-host", "release-notes", "0.3.0.md");
+        Assert.True(File.Exists(file), "no release notes file for the next release: " + file);
+        string text = File.ReadAllText(file);
+        Assert.Contains("API version 5", text);
+        Assert.Contains("slua_set_host_functions", text);
     }
 
     string Pack(string bundle, out string output)
