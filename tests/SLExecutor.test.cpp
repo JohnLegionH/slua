@@ -3512,6 +3512,7 @@ static void checkCaughtErrorInCallee(const char* body, const char* expected, boo
             result = exec.callEventHandler(LSLEvent::MovingStart, nullptr);
         }
         CHECK(result.status == HandlerRunStatus::Ok);
+        INFO("fault: ", exec.getFaultString());
         CHECK(exec.getFaultKind() == FaultKind::None);
     }
     checkCapture(ts.host.printed, {expected, expected});
@@ -3576,6 +3577,7 @@ TEST_CASE_FIXTURE(SLuaFixture, "SLExecutor a timer handler that catches an error
             resumeToCompletion(ts.exec, 1.0);
         else
             CHECK(result.status == HandlerRunStatus::Ok);
+        INFO("fault: ", ts.exec.getFaultString());
         CHECK(ts.exec.getFaultKind() == FaultKind::None);
     }
     checkCapture(ts.host.printed, {"tick", "tick"});
