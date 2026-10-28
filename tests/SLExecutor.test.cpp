@@ -3462,3 +3462,32 @@ TEST_CASE_FIXTURE(SLuaFixture, "SLExecutor serialize mid-handler roundtrip")
 }
 
 TEST_SUITE_END();
+
+TEST_CASE_FIXTURE(SLuaFixture, "SLExecutor a handler that catches an error with pcall finishes and the next event runs")
+{
+    TestScript ts(R"(
+        function LLEvents.moving_start()
+            local ok = pcall(function() error("boom") end)
+            print(`caught {ok}`)
+        end
+    )");
+    ts.start();
+    Script& exec = ts.exec;
+
+    RunResult first;
+    {
+        RunWindow window(exec, 1.0);
+        first = exec.callEventHandler(LSLEvent::MovingStart, nullptr);
+    }
+    CHECK(first.status == HandlerRunStatus::Ok);
+    CHECK(exec.getFaultKind() == FaultKind::None);
+
+    RunResult second;
+    {
+        RunWindow window(exec, 1.0);
+        second = exec.callEventHandler(LSLEvent::MovingStart, nullptr);
+    }
+    CHECK(second.status == HandlerRunStatus::Ok);
+    CHECK(exec.getFaultKind() == FaultKind::None);
+    checkCapture(ts.host.printed, {"caught false", "caught false"});
+}
