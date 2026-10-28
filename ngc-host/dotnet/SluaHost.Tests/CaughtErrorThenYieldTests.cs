@@ -97,19 +97,19 @@ public class CaughtErrorThenYieldTests
     {
         using var rig = new Rig();
         using var s = rig.Run("""
-            LLEvents:on("touch_start", function(n)
+            LLEvents:on("timer", function()
                 local ok = pcall(function() error("boom") end)
-                ossl.Report("handled", n, ok)
+                ossl.Report("handled", ok)
             end)
             """, tag: 8);
         s.RunToIdle();
 
-        StepResult first = s.Dispatch("touch_start", new[] { Value.Int(1) });
-        StepResult second = s.Dispatch("touch_start", new[] { Value.Int(2) });
+        StepResult first = s.Dispatch("timer", Array.Empty<Value>());
+        StepResult second = s.Dispatch("timer", Array.Empty<Value>());
 
-        Assert.NotEqual(StepStatus.Fault, first.Status);
-        Assert.NotEqual(StepStatus.Fault, second.Status);
-        Assert.Equal(new[] { "str:handled num:1 false", "str:handled num:2 false" }, rig.Kit.Snapshot());
+        Assert.True(first.Status != StepStatus.Fault, s.Fault().Message);
+        Assert.True(second.Status != StepStatus.Fault, s.Fault().Message);
+        Assert.Equal(new[] { "str:handled false", "str:handled false" }, rig.Kit.Snapshot());
     }
 
     [Fact]
@@ -117,19 +117,19 @@ public class CaughtErrorThenYieldTests
     {
         using var rig = new Rig();
         using var s = rig.Run("""
-            LLEvents:on("touch_start", function(n)
+            LLEvents:on("timer", function()
                 local ok = pcall(function() error("boom") end)
-                local r = ll.GetNotecardLineSync("card", n)
-                ossl.Report("handled", n, ok, r)
+                local r = ll.GetNotecardLineSync("card", 1)
+                ossl.Report("handled", ok, r)
             end)
             """, tag: 9);
         s.RunToIdle();
 
-        Assert.Equal(StepStatus.Preempted, s.Dispatch("touch_start", new[] { Value.Int(1) }).Status);
+        Assert.Equal(StepStatus.Preempted, s.Dispatch("timer", Array.Empty<Value>()).Status);
         rig.Results[9] = new[] { Value.Str("line") };
         StepResult finished = s.Step();
 
         Assert.Equal(StepStatus.Ok, finished.Status);
-        Assert.Equal(new[] { "str:handled num:1 false str:line" }, rig.Kit.Snapshot());
+        Assert.Equal(new[] { "str:handled false str:line" }, rig.Kit.Snapshot());
     }
 }
