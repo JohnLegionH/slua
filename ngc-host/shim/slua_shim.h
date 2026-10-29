@@ -276,8 +276,14 @@ SLUA_API int32_t slua_kill(slua_script* s);
 SLUA_API int32_t slua_serialize(slua_script* s, uint8_t** out, size_t* out_len);
 // Restores a saved state into a script that has not been started. Returns
 // SLUA_RESTORED_FRESH after starting the script fresh when the state was
-// saved by a different runtime commit or a different bound function list.
+// saved by a different runtime commit, or holds a host function this build no longer binds
+// (or binds the other way, plain or pausing). Functions bound since the save do not matter.
+// slua_restore_note then gives the reason.
 SLUA_API int32_t slua_restore(slua_script* s, const uint8_t* data, size_t len);
+// Copies the reason the last slua_restore of this script refused the state into buf (empty when it
+// restored, was not asked, or the state was not ours). Additive to API 5: a library without it
+// answers an entry-point error, which a host treats as no reason given.
+SLUA_API int32_t slua_restore_note(slua_script* s, char* buf, int32_t cap);
 
 SLUA_API int32_t slua_fault(slua_script* s, int32_t* kind, char* buf, int32_t cap);
 SLUA_API int32_t slua_used_memory(slua_script* s);

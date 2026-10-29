@@ -236,7 +236,7 @@ public class DecidingTests
     }
 
     [Fact]
-    public void T3_RestoreWithDifferentBoundFunctionsIsRefusedAndStartsFresh()
+    public void T3_RestoreWithAnExtraBoundFunctionRestoresTheState()
     {
         var (vm1, kit1) = NewVm();
         byte[] state;
@@ -246,15 +246,15 @@ public class DecidingTests
             Assert.Equal(StepStatus.Preempted, s.Step().Status);
             state = s.Serialize();
         }
-        // One extra function bound: the saved state must be refused, not half-restored.
+        // One extra function bound since the save: the state holds none of the functions that differ, so it is restored (the
+        // functions a state holds are checked one by one, see SavedStateFunctionSetTests).
         var (vm2, kit2) = NewVm(extra: true);
         using (vm2)
         {
             using var s2 = vm2.NewScript(Host.Compile(SaveMidYield, false), tag: 1);
-            Assert.False(s2.Restore(state));
-            // Fresh start: the script runs from the top and yields at the same place.
-            Assert.Equal(StepStatus.Preempted, s2.Step().Status);
-            Assert.Equal(BeforeLines, kit2.Snapshot());
+            Assert.True(s2.Restore(state));
+            Assert.Equal(StepStatus.Ok, s2.RunToIdle().Status);
+            Assert.Equal(AfterLines, kit2.Snapshot());
         }
     }
 

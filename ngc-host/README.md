@@ -272,19 +272,32 @@ Memory:
 
 ## Saved-state header and the fresh-start rule
 
-`slua_serialize` writes `"SLSH"`, a `u32` format version, a `u16` length and the text of the
-build stamp, a `u64` hash of the bound host-function list (sorted `table.name` entries with a
-mark for each pausing function, so registration order does not matter but a plain function and a
-pausing function of the same name differ), then the Executor's payload. `slua_restore` reads it
-into a script that has not been started:
+`slua_serialize` writes `"SLSH"`, a `u32` format version (2), a `u16` length and the text of the
+build stamp, a `u64` hash of the bound host-function list (kept for tools; sorted `table.name`
+entries with a mark for each pausing function), the list of host functions the saved state holds
+(a `u32` count, then for each a kind byte, 0 plain or 1 pausing, and a `u16` length with
+`table.name`), then the Executor's payload. `slua_restore` reads it into a script that has not been
+started:
 
 - Not our format (bad magic, truncated header, payload that cannot be read): an error
   (`SLUA_ERR_RESTORE`), and nothing is changed.
-- A different format version, a different build stamp or a different bound function list: the
-  state is refused and the script starts fresh, returning `SLUA_RESTORED_FRESH`. The reason is
-  logged at warning level. The saved state is never half-applied.
+- A different build stamp, or a format version the build does not read: the state is refused and
+  the script starts fresh, returning `SLUA_RESTORED_FRESH`. The reason is logged at warning level
+  and `slua_restore_note` gives it.
+- A state that holds a host function this build no longer binds, or binds the other way (plain or
+  pausing): refused the same way, and the note names the function.
+- A state saved when the host bound fewer or more functions than now is restored. The Executor
+  writes a closure it finds among the global tables' functions as that table's key (for example
+  `g/ossl/Add`), so a function bound since the save changes
+  nothing in the state; only the functions the state actually holds are looked up again.
+- A version 1 state (written by the 0.3.1 release) records only the hash of the list. It is restored
+  when the stamp matches; if the list has changed since, it is refused only when it mentions a
+  function this build binds as a pausing one, and if the Executor cannot rebuild it (it held a
+  function that is gone) the script starts fresh and the note says the list had changed.
 - A state that matches but fails inside the Executor's restore: the script starts fresh and
   `SLUA_RESTORED_FRESH` is returned.
+
+The saved state is never half-applied.
 
 ### The build stamp
 
@@ -301,9 +314,10 @@ host's stored scripts start fresh.
   from the pin. The runtime part is then `tree-<10 hex>`, a hash of the parent tree's file list
   (path and blob id of every file), so two builds of the same parent files agree.
 - `<n>` is the C API version.
-- The bound-function hash is the separate `u64` in the header.
+- The bound-function hash is the separate `u64` in the header; it no longer decides anything for a
+  version 2 state.
 
-A part that does not match, in any of the three, starts the script fresh. More parts can be
+A stamp part that does not match, in either of the two, starts the script fresh. More parts can be
 appended to the stamp text later without changing the header layout.
 
 A host that stores saved state keeps the original asset or source beside it, because a fresh

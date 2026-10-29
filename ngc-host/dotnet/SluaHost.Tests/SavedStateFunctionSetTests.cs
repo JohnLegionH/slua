@@ -219,7 +219,7 @@ public class SavedStateFunctionSetTests
     }
 
     [Fact]
-    public void ANewStateIsReadableByTheV031LibrarysHeaderCheckOnlyAsAnUnknownVersion()
+    public void ANewStateIsReadByTheV031LibraryAsAnUnknownVersion()
     {
         byte[] state = SaveAtTheYield(HoldsNothing);
         Assert.Equal("SLSH", System.Text.Encoding.ASCII.GetString(state, 0, 4));

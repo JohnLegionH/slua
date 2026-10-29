@@ -479,8 +479,27 @@ public sealed unsafe class Script : IDisposable
         return rc == Host.Ok;
     }
 
-    /// <summary>Why the last <see cref="Restore"/> refused the saved state and started the script fresh; empty when it restored or was not asked.</summary>
-    public string RestoreNote => "";
+    /// <summary>
+    /// Why the last <see cref="Restore"/> refused the saved state and started the script fresh; empty when it restored or was not asked,
+    /// and when the library is one that does not give a reason.
+    /// </summary>
+    public string RestoreNote
+    {
+        get
+        {
+            byte* buf = stackalloc byte[1024];
+            try
+            {
+                if (Native.slua_restore_note(_h, buf, 1024) != Host.Ok)
+                    return "";
+            }
+            catch (EntryPointNotFoundException)
+            {
+                return "";
+            }
+            return Marshal.PtrToStringUTF8((IntPtr)buf) ?? "";
+        }
+    }
 
     public (FaultKind Kind, string Message) Fault()
     {

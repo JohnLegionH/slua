@@ -37,6 +37,7 @@
 #include <shared_mutex>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #if defined(_WIN32)
@@ -193,6 +194,8 @@ struct slua_script : LiveCounted<slua_script>
     int32_t reportedHandlersKnown = 0;
     // Set by slua_add_sleep, cleared when a host function starts; tells the call's end that it asked for a delay.
     std::atomic<bool> delayAddedInCall{false};
+    // Why the last slua_restore refused the saved state and started the script fresh; empty otherwise.
+    std::string restoreNote;
 };
 
 namespace
@@ -560,8 +563,35 @@ void populateEnvironment(IEnvironment& environment, lua_State* L)
     }
 }
 
-// Saved-state header: "SLSH", u32 version, u16 commit length, commit, u64 function-list hash.
-constexpr uint32_t kStateVersion = 1;
+// Saved-state header: "SLSH", u32 version, u16 commit length, commit, u64 function-list hash, and from version 2 a list of the
+// host functions the state holds (u32 count, then per function a u8 kind, 0 plain or 1 pausing, and a u16 length with "table.name").
+// Version 1 states, which the 0.3.1 release wrote, are still read; they carry only the hash.
+//
+// The state itself names a host function by its place in the global tables
+// (Ares writes a closure it finds in the permanents table as that table's key, for example "g/ossl/Add"), so a host that
+// has bound more functions since the save restores it unchanged. The list is kept to refuse, with the function's name, the one
+// case that cannot restore: the state holds a function this build no longer binds, or binds the other way (plain or pausing).
+constexpr uint32_t kStateVersion = 2;
+constexpr uint32_t kLegacyStateVersion = 1;
+
+bool isIdentifierByte(unsigned char c)
+{
+    return c == '_' || (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+
+// True when the payload holds the permanents-table key of table.name ("g/table/name", not followed by more of a name).
+bool payloadHolds(const char* data, size_t len, const std::string& table, const std::string& name)
+{
+    const std::string key = "g/" + table + "/" + name;
+    const std::string_view all(data, len);
+    for (size_t at = all.find(key); at != std::string_view::npos; at = all.find(key, at + 1))
+    {
+        const size_t end = at + key.size();
+        if (end == len || !isIdentifierByte((unsigned char)data[end]))
+            return true;
+    }
+    return false;
+}
 
 void put32(std::string& s, uint32_t v) { s.append((const char*)&v, 4); }
 void put16(std::string& s, uint16_t v) { s.append((const char*)&v, 2); }
@@ -1625,6 +1655,18 @@ SLUA_API int32_t slua_serialize(slua_script* s, uint8_t** out, size_t* out_len)
     put16(blob, (uint16_t)stamp.size());
     blob += stamp;
     put64(blob, s->vm->fnHash);
+    std::vector<const HostFnRec*> held;
+    for (const HostFnRec& f : s->vm->fns)
+        if (f.kind != HostFnKind::PausingTake && payloadHolds(payload.data(), payload.size(), f.table, f.name))
+            held.push_back(&f);
+    put32(blob, (uint32_t)held.size());
+    for (const HostFnRec* f : held)
+    {
+        const std::string label = f->table + "." + f->name;
+        blob += (char)(f->kind == HostFnKind::PausingStart ? 1 : 0);
+        put16(blob, (uint16_t)label.size());
+        blob += label;
+    }
     blob += payload;
 
     uint8_t* mem = (uint8_t*)outAlloc(blob.size());
@@ -1637,6 +1679,24 @@ SLUA_API int32_t slua_serialize(slua_script* s, uint8_t** out, size_t* out_len)
     SLUA_CATCH
 }
 
+// Starts the script fresh because its saved state was refused, and keeps the reason for slua_restore_note.
+static int32_t refuseRestore(slua_script* s, const std::string& why)
+{
+    s->restoreNote = why;
+    logWarn("shim", "saved state refused: %s: starting the script fresh", why.c_str());
+    return s->script->loadDefaultState() ? SLUA_RESTORED_FRESH : SLUA_ERR_LOAD;
+}
+
+static std::string joinNames(const std::vector<std::string>& names)
+{
+    std::string out;
+    for (size_t i = 0; i < names.size() && i < 5; ++i)
+        out += (i ? ", " : "") + names[i];
+    if (names.size() > 5)
+        out += " and " + std::to_string(names.size() - 5) + " more";
+    return out;
+}
+
 SLUA_API int32_t slua_restore(slua_script* s, const uint8_t* data, size_t len)
 {
     SLUA_TRY
@@ -1647,9 +1707,10 @@ SLUA_API int32_t slua_restore(slua_script* s, const uint8_t* data, size_t len)
         return SLUA_ERR_BUSY;
     if (s->script->hasInstance())
         return SLUA_ERR_STATE;
+    s->restoreNote.clear();
 
     // Header: a blob that is not ours at all is an error; a blob from another
-    // runtime or another bound function list starts the script fresh.
+    // runtime, or one that holds a host function this build cannot give it, starts the script fresh.
     size_t pos = 0;
     auto need = [&](size_t n) { return len - pos >= n; };
     if (!need(4) || std::memcmp(data, "SLSH", 4) != 0)
@@ -1660,11 +1721,8 @@ SLUA_API int32_t slua_restore(slua_script* s, const uint8_t* data, size_t len)
     uint32_t version;
     std::memcpy(&version, data + pos, 4);
     pos += 4;
-    if (version != kStateVersion)
-    {
-        logWarn("shim", "saved state has format version %u, this build writes %u: starting the script fresh", version, kStateVersion);
-        return s->script->loadDefaultState() ? SLUA_RESTORED_FRESH : SLUA_ERR_LOAD;
-    }
+    if (version != kStateVersion && version != kLegacyStateVersion)
+        return refuseRestore(s, "it has format version " + std::to_string(version) + ", this build reads " + std::to_string(kLegacyStateVersion) + " and " + std::to_string(kStateVersion));
     if (!need(2))
         return SLUA_ERR_RESTORE;
     uint16_t commit_len;
@@ -1679,22 +1737,85 @@ SLUA_API int32_t slua_restore(slua_script* s, const uint8_t* data, size_t len)
     pos += 8;
 
     if (commit != stampText())
+        return refuseRestore(s, "it is stamped '" + commit + "', this build is '" + stampText() + "'");
+
+    auto find = [&](const std::string& table, const std::string& name) -> const HostFnRec* {
+        for (const HostFnRec& f : s->vm->fns)
+            if (f.kind != HostFnKind::PausingTake && f.table == table && f.name == name)
+                return &f;
+        return nullptr;
+    };
+
+    bool listChanged = false;
+    if (version == kStateVersion)
     {
-        logWarn("shim", "saved state is stamped '%s', this build is '%s': starting the script fresh", commit.c_str(), stampText().c_str());
-        return s->script->loadDefaultState() ? SLUA_RESTORED_FRESH : SLUA_ERR_LOAD;
+        // The functions the state holds, each of which must still be bound the same way.
+        if (!need(4))
+            return SLUA_ERR_RESTORE;
+        uint32_t count;
+        std::memcpy(&count, data + pos, 4);
+        pos += 4;
+        std::vector<std::string> gone, rebound;
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            if (!need(3))
+                return SLUA_ERR_RESTORE;
+            const bool pausing = data[pos] != 0;
+            uint16_t n;
+            std::memcpy(&n, data + pos + 1, 2);
+            pos += 3;
+            if (!need(n))
+                return SLUA_ERR_RESTORE;
+            const std::string label((const char*)data + pos, n);
+            pos += n;
+            const size_t dot = label.find('.');
+            if (dot == std::string::npos)
+                return SLUA_ERR_RESTORE;
+            const HostFnRec* now = find(label.substr(0, dot), label.substr(dot + 1));
+            if (now == nullptr)
+                gone.push_back(label);
+            else if ((now->kind == HostFnKind::PausingStart) != pausing)
+                rebound.push_back(label + " (saved as a " + (pausing ? "pausing" : "plain") + " function, now a " + (pausing ? "plain" : "pausing") + " one)");
+        }
+        if (!gone.empty())
+            return refuseRestore(s, "it holds the host function " + joinNames(gone) + ", which this build no longer provides");
+        if (!rebound.empty())
+            return refuseRestore(s, "it holds the host function " + joinNames(rebound) + ", which this build binds differently");
     }
-    if (hash != s->vm->fnHash)
+    else if (hash != s->vm->fnHash)
     {
-        logWarn("shim", "saved state was made with a different set of bound host functions: starting the script fresh");
-        return s->script->loadDefaultState() ? SLUA_RESTORED_FRESH : SLUA_ERR_LOAD;
+        // A version 1 state records only a hash of the list, so which functions it holds is not known. A pausing function
+        // it might be waiting inside has to be bound as it was; refuse when the state mentions one this build binds that way.
+        listChanged = true;
+        std::vector<std::string> pausing;
+        for (const HostFnRec& f : s->vm->fns)
+            if (f.kind == HostFnKind::PausingStart && payloadHolds((const char*)data + pos, len - pos, f.table, f.name))
+                pausing.push_back(f.table + "." + f.name);
+        if (!pausing.empty())
+            return refuseRestore(s, "it was saved with another set of host functions and mentions " + joinNames(pausing) + ", which this build binds as a pausing function");
     }
+
     if (!s->script->restoreState((const char*)data + pos, len - pos))
     {
-        logWarn("shim", "saved state could not be restored: starting the script fresh");
         if (s->script->hasInstance())
             s->script->reset();
-        return s->script->loadDefaultState() ? SLUA_RESTORED_FRESH : SLUA_ERR_LOAD;
+        return refuseRestore(s, listChanged
+            ? std::string("the runtime could not restore it; it was saved with another set of host functions and may hold one this build no longer provides")
+            : std::string("the runtime could not restore it"));
     }
+    return SLUA_OK;
+    SLUA_CATCH
+}
+
+SLUA_API int32_t slua_restore_note(slua_script* s, char* buf, int32_t cap)
+{
+    SLUA_TRY
+    if (s == nullptr || buf == nullptr || cap <= 0)
+        return SLUA_ERR_BAD_ARG;
+    VmGuard guard(s->vm);
+    if (!guard.ok())
+        return SLUA_ERR_BUSY;
+    std::snprintf(buf, (size_t)cap, "%s", s->restoreNote.c_str());
     return SLUA_OK;
     SLUA_CATCH
 }
