@@ -16,4 +16,7 @@
     <ProjectReference Include="..\SluaHost.TestKit\SluaHost.TestKit.csproj" />
     <ProjectReference Include="..\SluaHost.Tool\SluaHost.Tool.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="TestData\*.state" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

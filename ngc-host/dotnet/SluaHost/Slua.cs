@@ -479,6 +479,9 @@ public sealed unsafe class Script : IDisposable
         return rc == Host.Ok;
     }
 
+    /// <summary>Why the last <see cref="Restore"/> refused the saved state and started the script fresh; empty when it restored or was not asked.</summary>
+    public string RestoreNote => "";
+
     public (FaultKind Kind, string Message) Fault()
     {
         byte* buf = stackalloc byte[4096];
