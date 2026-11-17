@@ -35,7 +35,6 @@ extern int optimizationLevel;
 LUAU_FASTINT(CodegenHeuristicsInstructionLimit)
 LUAU_DYNAMIC_FASTFLAG(LuauCodegenTrackingMultilocationFix)
 LUAU_FASTFLAG(LuauCodegenDetailedCompilationResult)
-LUAU_FASTFLAG(LuauIntegerType2)
 
 
 static int yielding_print(lua_State* L)
@@ -373,6 +372,50 @@ TEST_CASE("List Concat")
     CHECK_EQ(YIELD_NUM(state.get()), 3);
 }
 
+TEST_CASE("Concat")
+{
+    auto state = runConformance("concat.lsl", [](lua_State *L)
+        {
+            std::string actual = luaL_checkstring(L, 1);
+            std::string expected;
+            switch(YIELD_NUM(L))
+            {
+                case 0: expected = std::string(100, '1'); break;
+                case 1:
+                    for (int i = 0; i < 300; ++i)
+                        expected += std::to_string(i);
+                    break;
+                case 2:
+                    for (int i = 299; i >= 0; --i)
+                        expected += std::to_string(i) + ",";
+                    break;
+                case 3: expected = "1234"; break;
+                case 4: expected = "4,3,2,1,"; break;
+                case 5: expected = "123456"; break;
+                case 6: expected = "6,5,"; break;
+                case 7: expected = "65536"; break;
+                case 8:
+                    for (int i = 0; i < 300; ++i)
+                        expected += (i ? "," : "") + std::to_string(i);
+                    break;
+                case 9:
+                    for (int i = 299; i >= 0; --i)
+                        expected += std::to_string(i) + ",";
+                    break;
+                case 10: expected = "1,2,3,4"; break;
+                case 11: expected = "4,3,2,1,"; break;
+                case 12: expected = "1,2,3,4,56"; break;
+                case 13: expected = "6,5,"; break;
+                case 14: expected = "78,1,2,3,4,56"; break;
+                case 15: expected = "8,7,"; break;
+                default: assert(0);
+            }
+            CHECK_EQ(actual, expected);
+            return -1;
+        });
+    CHECK_EQ(YIELD_NUM(state.get()), 16);
+}
+
 TEST_CASE("Vector Cast")
 {
     auto state = runConformance("vector_cast.lsl", [](lua_State *L)
@@ -585,12 +628,19 @@ TEST_CASE("Quaternions")
             {
                 case 0: expected = "<1.00000, 2.00000, 3.00000, 4.00000>"; break;
                 case 1: expected = "<1.00000, 2.00000, 3.00000, 4.00000>"; break;
+                // Rotation math results are what Mono produces: float inputs,
+                // double intermediates, one rounding to float per component.
+                case 2: expected = "<1142.99400, -673.36550, 16626.49000>"; break;
+                case 3: expected = "<8310.14800, 90363.16000, 43793.37000>"; break;
+                case 4: expected = "<-222272.60000, 354210.60000, -293349.60000>"; break;
+                case 5: expected = "<-655386.60000, 306964.60000, -699282.70000, -293248.40000>"; break;
+                case 6: expected = "<-9382.83300, -9259.14200, -493.94460, 617.16670>"; break;
                 default: assert(0);
             }
             CHECK_EQ(actual, std::string(expected));
             return -1;
         });
-    CHECK_EQ(YIELD_NUM(state.get()), 2);
+    CHECK_EQ(YIELD_NUM(state.get()), 7);
 }
 
 TEST_CASE("Accessors")

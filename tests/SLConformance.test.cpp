@@ -26,6 +26,8 @@
 #include "../VM/src/lgc.h"
 #include "../VM/src/ltable.h"
 
+#include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <set>
 #include <string>
@@ -131,6 +133,17 @@ static std::string getSourceFilePath(std::string name)
     return path;
 }
 
+// Nothing in Lua-land can make an integer, so tests that need one get this helper. Takes a number, or a decimal string for values
+// a double can't hold.
+static int lua_test_integer(lua_State* L)
+{
+    if (lua_type(L, 1) == LUA_TSTRING)
+        lua_pushinteger64(L, strtoll(lua_tostring(L, 1), nullptr, 10));
+    else
+        lua_pushinteger64(L, (int64_t)luaL_checknumber(L, 1));
+    return 1;
+}
+
 static int lua_collectgarbage(lua_State* L)
 {
     static const char* const opts[] = {"stop", "restart", "collect", "count", "isrunning", "step", "setgoal", "setstepmul", "setstepsize", nullptr};
@@ -175,7 +188,7 @@ static int memoryLimitCallback(lua_State *L, size_t osize, size_t nsize)
     RuntimeState* state = (RuntimeState*)L->userdata;
 
     // Bail if GC is disabled (host bulk work like luau_load)
-    if (L->global->GCthreshold == SIZE_MAX)
+    if (L->global->GCthreshold == SIZE_MAX || L->global->gcdisabled != 0)
         return 0;
 
     // This is a net shrink in memory, not relevant for our limiting logic. We can't assume that
@@ -243,6 +256,7 @@ static StateRef runConformance(const char* name, void (*yield)(lua_State* L) = n
     // Register a few global functions for conformance tests
     std::vector<luaL_Reg> funcs = {
         {"collectgarbage", lua_collectgarbage},
+        {"integer", lua_test_integer},
     };
 
     // "null" terminate the list of functions to register
@@ -696,6 +710,58 @@ TEST_CASE("Nested Breaks")
     runConformance("nested_breaks.lua", nullptr, [](lua_State *L) {
         lua_pushcfunction(L, lua_break, "breaker");
         lua_setglobal(L, "breaker");
+    });
+}
+
+// A yieldable C function calling a Lua callee with lua_call, reporting which
+// way control came back to it: straight through the call, or through the
+// continuation after the frame was dropped. The stack top it saw its result
+// at goes along, since a frame that isn't trimmed to the result is as wrong
+// as one resumed the wrong way.
+static int callthrough_finish(lua_State* L, const char* tag)
+{
+    int top = lua_gettop(L);
+    lua_pushstring(L, tag);
+    lua_pushinteger(L, top);
+    lua_pushvalue(L, 2);
+    return 3;
+}
+
+static int callthrough(lua_State* L)
+{
+    luaL_checktype(L, 1, LUA_TFUNCTION);
+    lua_settop(L, 1);
+    lua_pushvalue(L, 1);
+    lua_call(L, 0, 1);
+    if (lua_status(L) != LUA_OK)
+        return -1;
+    return callthrough_finish(L, "direct");
+}
+
+static int callthrough_k(lua_State* L, int status)
+{
+    return callthrough_finish(L, "cont");
+}
+
+// A yieldable C function reaching a metamethod through the aux library
+static int tostring_through(lua_State* L)
+{
+    luaL_tolstring(L, 1, nullptr);
+    return 1;
+}
+
+static int tostring_through_k(lua_State* L, int status)
+{
+    return 1;
+}
+
+TEST_CASE("Yieldable C caller call contract")
+{
+    runConformance("callthrough.lua", nullptr, [](lua_State *L) {
+        lua_pushcclosurek(L, callthrough, "callthrough", 0, callthrough_k);
+        lua_setglobal(L, "callthrough");
+        lua_pushcclosurek(L, tostring_through, "tostring_through", 0, tostring_through_k);
+        lua_setglobal(L, "tostring_through");
     });
 }
 

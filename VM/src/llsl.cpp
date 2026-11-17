@@ -12,6 +12,7 @@
 
 #include "lnumutils.h"
 #include "llsl.h"
+#include "lstrbuf.h"
 #include "mono_floats.h"
 #include "Luau/Bytecode.h"
 #include "Luau/LSLBuiltins.h"
@@ -239,23 +240,19 @@ uint8_t luaSL_lsl_type(lua_State *L, int idx)
     return lua_lsl_type(val);
 }
 
-static int _lsl_cast_internal(lua_State* L, bool in_list, bool neg_zero, bool nil_as_default)
+/// Push `orig_val` cast to `to_lsl_type`. Pushes nothing and returns 0 if there's no such cast.
+static int lsl_cast_value(lua_State* L, const TValue* orig_val, LSLIType to_lsl_type, bool in_list, bool neg_zero, bool nil_as_default)
 {
-    luaL_checkstack(L, 4, "cast");
-
-    luaL_checkany(L, 1);
-    // Local copy so we can normalize it
+    // Local copy so we can normalize it, taken before the stack can move under `orig_val`
     TValue val_copy;
-    setobj(L, &val_copy, luaA_toobject(L, 1));
+    setobj(L, &val_copy, orig_val);
     const TValue *val = &val_copy;
+
+    luaL_checkstack(L, 4, "cast");
 
     if (ttisboolean(val))
         setintvalue(&val_copy, bvalue(val));
 
-    int to_type = luaL_checkinteger(L, 2);
-    // Since we don't allow this to be called with arbitrary args, this must be valid.
-    LUAU_ASSERT(to_type < (int)LSLIType::LST_ERROR);
-    auto to_lsl_type = (LSLIType)to_type;
     auto existing_type = (LSLIType)lua_lsl_type(val);
 
     if (existing_type == LSLIType::LST_ERROR)
@@ -505,33 +502,7 @@ static int _lsl_cast_internal(lua_State* L, bool in_list, bool neg_zero, bool ni
             if (to_lsl_type != LSLIType::LST_STRING)
                 return 0;
 
-            LuaTable *table_val = hvalue(val);
-            const size_t len = luaH_getn(table_val);
-            // Stupid hack, just string cast all elements and concat at the end.
-            lua_pushstring(L, "");
-            for(size_t idx = 0; idx<len; ++idx)
-            {
-                if (ttisstring(&table_val->array[idx]))
-                {
-                    // Don't need to cast strings, just push.
-                    luaA_pushvalue(L, &table_val->array[idx]);
-                }
-                else
-                {
-                    lua_pushcfunction(L, &lsl_cast_list_elem, "cast_list");
-                    luaA_pushvalue(L, &table_val->array[idx]);
-                    luaSL_pushinteger(L, LSLIType::LST_STRING);
-                    lua_call(L, 2, 1);
-                }
-                lua_concat(L, 2);
-
-                // Matches Mono behavior
-                if (lua_strlen(L, -1) > UINT16_MAX)
-                {
-                    luaD_throw(L, LUA_ERRMEM);
-                }
-            }
-            return 1;
+            return lsl_list_to_string(L, hvalue(val), "", 0, neg_zero);
         }
         default:
         {
@@ -542,6 +513,15 @@ static int _lsl_cast_internal(lua_State* L, bool in_list, bool neg_zero, bool ni
     return 1;
 }
 
+static int _lsl_cast_internal(lua_State* L, bool in_list, bool neg_zero, bool nil_as_default)
+{
+    luaL_checkany(L, 1);
+    int to_type = luaL_checkinteger(L, 2);
+    // Since we don't allow this to be called with arbitrary args, this must be valid.
+    LUAU_ASSERT(to_type < (int)LSLIType::LST_ERROR);
+    return lsl_cast_value(L, luaA_toobject(L, 1), (LSLIType)to_type, in_list, neg_zero, nil_as_default);
+}
+
 int lsl_cast_list_elem(lua_State *L)
 {
     return _lsl_cast_internal(L, true, true, false);
@@ -550,6 +530,28 @@ int lsl_cast_list_elem(lua_State *L)
 int lsl_cast_list_elem_poszero(lua_State *L)
 {
     return _lsl_cast_internal(L, true, false, false);
+}
+
+int lsl_list_to_string(lua_State *L, LuaTable *h, const char *sep, size_t sep_len, bool neg_zero)
+{
+    const int len = luaH_getn(h);
+    luaL_checkstack(L, 2, "list to string");
+
+    auto *strbuf = luaYB_push(L);
+    for (int i = 0; i < len; ++i)
+    {
+        if (i != 0)
+            luaYB_appendmem(L, strbuf, sep, sep_len);
+
+        // Lists can't nest, and letting one through would recurse without a depth check
+        const TValue *elem = &h->array[i];
+        if (ttistable(elem) || !lsl_cast_value(L, elem, LSLIType::LST_STRING, true, neg_zero, false))
+            luaL_errorL(L, "non-LSL value in list");
+        luaYB_addvalue(L, strbuf);
+    }
+
+    luaYB_tostring(L, lua_gettop(L), true);
+    return 1;
 }
 
 int lsl_cast(lua_State *L)
@@ -575,56 +577,39 @@ static int lsl_try_cast_nil_default(lua_State *L)
     return 1;
 }
 
-static LuaTable* _lsl_arg_to_table(lua_State *L, int argn)
-{
-    if (lua_type(L, argn) == LUA_TTABLE)
-    {
-        return hvalue(luaA_toobject(L, argn));
-    }
-    else
-    {
-        // make a new single-element table and place the argument in it
-        lua_createtable(L, 1, 0);
-        LuaTable *new_tab = hvalue(luaA_toobject(L, -1));
-        setobj(L, &new_tab->array[0], luaA_toobject(L, argn));
-        return new_tab;
-    }
-}
-
+// Concatenates any number of operands, given in LSL evaluation order (rightmost first)
 static int lsl_table_concat(lua_State *L)
 {
-    if (lua_type(L, 1) != LUA_TTABLE && lua_type(L, 2) != LUA_TTABLE)
-        luaL_errorL(L, "At least one argument must be a table");
+    const int nargs = lua_gettop(L);
+    luaL_checkstack(L, 1, "table concat");
 
-    lua_settop(L, 2);
-    luaL_checkstack(L, 4, "table concat");
+    // A chunk of a longer chain may be all scalars, so no list operand is required
+    int new_len = 0;
+    for (int i = 1; i <= nargs; ++i)
+    {
+        const TValue *arg = luaA_toobject(L, i);
+        new_len += ttistable(arg) ? luaH_getn(hvalue(arg)) : 1;
+    }
 
-    // Note: reversed because of LSL evaluation order!
-    LuaTable *l_h = _lsl_arg_to_table(L, 2);
-    LuaTable *r_h = _lsl_arg_to_table(L, 1);
-
-    int l_len = luaH_getn(l_h);
-    int new_len = l_len + luaH_getn(r_h);
-
-    // Push immediately so this is correctly rooted
     lua_createtable(L, new_len, 0);
     LuaTable *new_h = hvalue(luaA_toobject(L, -1));
-
-    for (int i = 0; i<new_len; ++i)
+    TValue *dest = new_h->array;
+    // The rightmost operand comes first
+    for (int i = nargs; i >= 1; --i)
     {
-        LuaTable* source_h = l_h;
-        int effective_i = i;
-        // Start reading from rhs if we passed the end of lhs
-        if (i >= l_len)
+        const TValue *arg = luaA_toobject(L, i);
+        // Anything that isn't a list is appended as a single element
+        if (!ttistable(arg))
         {
-            effective_i -= l_len;
-            source_h = r_h;
+            setobj(L, dest++, arg);
+            continue;
         }
-        setobj(L, &new_h->array[i], &source_h->array[effective_i]);
+
+        LuaTable *h = hvalue(arg);
+        const int len = luaH_getn(h);
+        for (int j = 0; j < len; ++j)
+            setobj(L, dest++, &h->array[j]);
     }
-    // Move the object to the return value position, clobbering any temp lists.
-    if (lua_gettop(L) != 3)
-        lua_replace(L, 3);
     return 1;
 }
 
@@ -686,46 +671,57 @@ static int lsl_replace_axis(lua_State *L)
     return 1;
 }
 
+// Both of these are cribbed from ScriptTypes.cs in indra, rather than `llmath`.
+// Mono's JIT evaluated those float expressions in double and rounded to float
+// only on the final store, so the inputs are widened here and each component
+// is narrowed exactly once.
+
+// ScriptTypes.cs Combine(q2 = a, q1 = b)
 static void mul_quat(const float *a, const float *b, float *res)
 {
-    res[0] = b[3] * a[0] + b[0] * a[3] + b[1] * a[2] - b[2] * a[1];
-    res[1] = b[3] * a[1] + b[1] * a[3] + b[2] * a[0] - b[0] * a[2];
-    res[2] = b[3] * a[2] + b[2] * a[3] + b[0] * a[1] - b[1] * a[0];
-    res[3] = b[3] * a[3] - b[0] * a[0] - b[1] * a[1] - b[2] * a[2];
+    const double q2x = a[0], q2y = a[1], q2z = a[2], q2s = a[3];
+    const double q1x = b[0], q1y = b[1], q1z = b[2], q1s = b[3];
+    res[0] = (float)((q1s * q2x) + (q1x * q2s) + (q1y * q2z) - (q1z * q2y));
+    res[1] = (float)((q1s * q2y) - (q1x * q2z) + (q1y * q2s) + (q1z * q2x));
+    res[2] = (float)((q1s * q2z) + (q1x * q2y) - (q1y * q2x) + (q1z * q2s));
+    res[3] = (float)((q1s * q2s) - (q1x * q2x) - (q1y * q2y) - (q1z * q2z));
 }
 
+// ScriptTypes.cs Rotate(lhs = vec, rhs = rot)
 void rot_vec(const float *vec, const float *rot, float *res)
 {
-    // This is cribbed from ScriptTypes.cs in indra, rather than `llmath`.
-    res[0] =
-        rot[3] * rot[3] * vec[0] +
-        2.0f * rot[1] * rot[3] * vec[2] -
-        2.0f * rot[2] * rot[3] * vec[1] +
-        rot[0] * rot[0] * vec[0] +
-        2.0f * rot[1] * rot[0] * vec[1] +
-        2.0f * rot[2] * rot[0] * vec[2] -
-        rot[2] * rot[2] * vec[0] -
-        rot[1] * rot[1] * vec[0];
+    const double x = rot[0], y = rot[1], z = rot[2], s = rot[3];
+    const double vx = vec[0], vy = vec[1], vz = vec[2];
 
-    res[1] =
-        2.0f * rot[0] * rot[1] * vec[0] +
-        rot[1] * rot[1] * vec[1] +
-        2.0f * rot[2] * rot[1] * vec[2] +
-        2.0f * rot[3] * rot[2] * vec[0] -
-        rot[2] * rot[2] * vec[1] +
-        rot[3] * rot[3] * vec[1] -
-        2.0f * rot[0] * rot[3] * vec[2] -
-        rot[0] * rot[0] * vec[1];
+    res[0] = (float)(
+        s * s * vx +
+        2.0 * y * s * vz -
+        2.0 * z * s * vy +
+        x * x * vx +
+        2.0 * y * x * vy +
+        2.0 * z * x * vz -
+        z * z * vx -
+        y * y * vx);
 
-    res[2] =
-        2.0f * rot[0] * rot[2] * vec[0] +
-        2.0f * rot[1] * rot[2] * vec[1] +
-        rot[2] * rot[2] * vec[2] -
-        2.0f * rot[3] * rot[1] * vec[0] -
-        rot[1] * rot[1] * vec[2] +
-        2.0f * rot[3] * rot[0] * vec[1] -
-        rot[0] * rot[0] * vec[2] +
-        rot[3] * rot[3] * vec[2];
+    res[1] = (float)(
+        2.0 * x * y * vx +
+        y * y * vy +
+        2.0 * z * y * vz +
+        2.0 * s * z * vx -
+        z * z * vy +
+        s * s * vy -
+        2.0 * x * s * vz -
+        x * x * vy);
+
+    res[2] = (float)(
+        2.0 * x * z * vx +
+        2.0 * y * z * vy +
+        z * z * vz -
+        2.0 * s * y * vx -
+        y * y * vz +
+        2.0 * s * x * vy -
+        x * x * vz +
+        s * s * vz);
 }
 
 void conj_quat(float *quat)

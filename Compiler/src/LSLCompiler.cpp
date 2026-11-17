@@ -9,11 +9,15 @@
 #include <tailslide/tailslide.hh>
 #include <tailslide/logger.hh>
 #include <tailslide/passes/constant_expression_simplifier.hh>
+#include <algorithm>
 #include <unordered_set>
+#include <vector>
 
 using namespace Tailslide;
 
 constexpr uint32_t kMaxRegisterCount = 255;
+// Most string operands a single CONCAT may take
+constexpr uint32_t kConcatChunkSize = 32;
 constexpr uint32_t kMaxLocalCount = 200;
 constexpr uint32_t kMaxStringImportRef = 1024;
 // static const uint32_t kMaxInstructionCount = 1'000'000'000;
@@ -400,6 +404,7 @@ struct TargetRegScope
     TargetRegScope(LuauVisitor* self, uint8_t target_reg)
         : self(self)
         , targetReg(target_reg)
+        , regScope(self)
     {
         oldTargetReg = self->mTargetReg;
         self->mTargetReg = target_reg;
@@ -414,6 +419,9 @@ struct TargetRegScope
     LuauVisitor* self;
     int16_t targetReg;
     int16_t oldTargetReg;
+    // Anything we allocate under this is logically a temporary, so open a new scope
+    // when this object is constructed.
+    RegScope regScope;
 };
 
 static Luau::BytecodeBuilder::StringRef sref(const std::string &str)
@@ -1419,40 +1427,12 @@ bool LuauVisitor::visit(LSLBinaryExpression* bin_expr)
         // Addition operator is special for certain types
         if (lhs->getIType() == LST_LIST || rhs->getIType() == LST_LIST)
         {
-            // Oh, we have an expected target, just alloc a new register for the function call
-            // then MOVE the result into it after.
-            auto func_reg = target_reg;
-            if (expected_target != -1)
-                func_reg = allocReg(bin_expr);
-            // place the concat closure on the stack
-            pushImport(func_reg, "lsl", "table_concat");
-            // Push RHS first because LSL is whack and evaluates RHS first.
-            pushArgument(rhs);
-            pushArgument(lhs);
-
-            mBuilder->emitABC(LOP_CALL, func_reg, 2 + 1, 1 + 1);
-            maybeMove(expected_target, func_reg);
+            emitListConcat(bin_expr, expected_target, target_reg);
             return false;
         }
         else if (lhs->getIType() == LST_STRING && rhs->getIType() == LST_STRING)
         {
-            // Concatenation is... special. The arguments need to be contiguous,
-            // but LSL evaluates right-to-left, so we need to be careful to place
-            // things in the correct order even though they're evaluated
-            // out-of-order.
-            [[maybe_unused]] RegScope reg_scope(this);
-            const auto concat_reg = allocReg(bin_expr, 2);
-            {
-                TargetRegScope target_reg_scope(this, concat_reg + 1);
-                rhs->visit(this);
-            }
-            {
-                TargetRegScope target_reg_scope(this, concat_reg);
-                lhs->visit(this);
-            }
-            mBuilder->emitABC(LOP_CONCAT, target_reg, concat_reg, concat_reg + 1);
-            // Seems like this is a no-op?
-            // maybeMove(expected_target, target_reg);
+            emitStringConcat(bin_expr, target_reg);
             return false;
         }
     }
@@ -2193,6 +2173,118 @@ uint8_t LuauVisitor::evalExprToSourceReg(LSLExpression* expr)
     uint8_t expected_reg = mRegTop;
     expr->visit(this);
     return expected_reg;
+}
+
+static bool isStringConcat(LSLExpression* expr)
+{
+    if (expr->getNodeSubType() != NODE_BINARY_EXPRESSION || expr->getOperation() != '+')
+        return false;
+    auto* bin_expr = (LSLBinaryExpression*)expr;
+    return bin_expr->getLHS()->getIType() == LST_STRING && bin_expr->getRHS()->getIType() == LST_STRING;
+}
+
+static bool isListConcat(LSLExpression* expr)
+{
+    if (expr->getNodeSubType() != NODE_BINARY_EXPRESSION || expr->getOperation() != '+')
+        return false;
+    auto* bin_expr = (LSLBinaryExpression*)expr;
+    return bin_expr->getLHS()->getIType() == LST_LIST || bin_expr->getRHS()->getIType() == LST_LIST;
+}
+
+/// Collect the leaves of a tree of `is_concat` nodes in source order, looking through parentheses.
+static void collectConcatOperands(LSLExpression* expr, bool (*is_concat)(LSLExpression*), std::vector<LSLExpression*>& operands)
+{
+    auto* inner_expr = expr;
+    while (inner_expr->getNodeSubType() == NODE_PARENTHESIS_EXPRESSION)
+        inner_expr = ((LSLParenthesisExpression*)inner_expr)->getChildExpr();
+
+    if (!is_concat(inner_expr))
+    {
+        operands.push_back(expr);
+        return;
+    }
+    auto* bin_expr = (LSLBinaryExpression*)inner_expr;
+    collectConcatOperands(bin_expr->getLHS(), is_concat, operands);
+    collectConcatOperands(bin_expr->getRHS(), is_concat, operands);
+}
+
+// String concat is a little special, and we want to evaluate as many sub-expressions
+// as possible BEFORE concatenating them. This saves us a lot of unnecessary GC churn.
+void LuauVisitor::emitStringConcat(LSLBinaryExpression* bin_expr, uint8_t target_reg)
+{
+    std::vector<LSLExpression*> operands;
+    collectConcatOperands(bin_expr, isStringConcat, operands);
+    const size_t count = operands.size();
+    LUAU_ASSERT(count >= 2);
+
+    [[maybe_unused]] RegScope reg_scope(this);
+
+    // Bigger chunks mean fewer CONCATs, but leave half the free registers to the operands.
+    // Chunks fold right-to-left, with the top slot carrying the result so far.
+    const size_t free_regs = kMaxRegisterCount - (size_t)mRegTop;
+    const size_t max_slots = std::clamp<size_t>(free_regs / 2, 2, kConcatChunkSize);
+    const size_t slot_count = std::min(count, max_slots);
+    const auto slots = allocReg(bin_expr, (unsigned int)slot_count);
+    const uint8_t top_slot = (uint8_t)(slots + slot_count - 1);
+    // One past the last slot still free for operands
+    uint8_t free_end = (uint8_t)(slots + slot_count);
+    size_t end = count;
+    while (end > 0)
+    {
+        const size_t begin = end - std::min<size_t>(end, free_end - slots);
+        const uint8_t first_slot = (uint8_t)(free_end - (end - begin));
+        for (size_t i = end; i-- > begin;)
+        {
+            TargetRegScope target_reg_scope(this, (uint8_t)(first_slot + (i - begin)));
+            operands[i]->visit(this);
+        }
+
+        mBuilder->emitABC(LOP_CONCAT, (begin == 0) ? target_reg : top_slot, first_slot, top_slot);
+        // The running result now lives in the top slot
+        free_end = top_slot;
+        end = begin;
+    }
+}
+
+// Like the string concatenation stuff, except we go right-to-left. Don't ask.
+void LuauVisitor::emitListConcat(LSLBinaryExpression* bin_expr, int16_t expected_target, uint8_t target_reg)
+{
+    std::vector<LSLExpression*> operands;
+    collectConcatOperands(bin_expr, isListConcat, operands);
+    const size_t count = operands.size();
+    LUAU_ASSERT(count >= 2);
+
+    // Oh, we have an expected target, just alloc a new register for the function call
+    // then MOVE the result into it after.
+    auto func_reg = target_reg;
+    if (expected_target != -1)
+        func_reg = allocReg(bin_expr);
+
+    const size_t free_regs = kMaxRegisterCount - (size_t)mRegTop;
+    const size_t max_args = std::clamp<size_t>(free_regs / 2, 2, kConcatChunkSize);
+    size_t end = count;
+    while (end > 0)
+    {
+        // Each call leaves its result in func_reg and frees its arguments
+        [[maybe_unused]] RegScope chunk_scope(this);
+        size_t arg_count = 0;
+        if (end != count)
+        {
+            // The result so far is everything to the right, so it goes first
+            mBuilder->emitABC(LOP_MOVE, allocReg(bin_expr), func_reg, 0);
+            arg_count = 1;
+        }
+        pushImport(func_reg, "lsl", "table_concat");
+
+        const size_t begin = end - std::min(end, max_args - arg_count);
+        for (size_t i = end; i-- > begin;)
+            pushArgument(operands[i]);
+        arg_count += end - begin;
+
+        mBuilder->emitABC(LOP_CALL, func_reg, (uint8_t)(arg_count + 1), 1 + 1);
+        end = begin;
+    }
+    maybeMove(expected_target, func_reg);
 }
 
 uint8_t LuauVisitor::allocReg(LSLASTNode *node, unsigned int count)

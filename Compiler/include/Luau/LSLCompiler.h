@@ -105,6 +105,10 @@ protected:
     /// necessary, it isn't appropriate when we need a particular register order like in `CALL`s.
     /// Basically, if you want the result to end up in a specific register, you can't use this.
     uint8_t evalExprToSourceReg(LSLExpression *expr);
+    /// Emit a whole tree of string `+` as chunked `CONCAT`s rather than one per node.
+    void emitStringConcat(LSLBinaryExpression* bin_expr, uint8_t target_reg);
+    /// Emit a whole tree of list `+` as chunked `lsl.table_concat` calls rather than one per node.
+    void emitListConcat(LSLBinaryExpression* bin_expr, int16_t expected_target, uint8_t target_reg);
     void pushArgument(LSLExpression* expr, bool want_float_cast=true);
     unsigned int pushConstant(LSLConstant* cv);
 
