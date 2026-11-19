@@ -25,22 +25,34 @@ constexpr uint32_t kMaxStringImportRef = 1024;
 // Masks are 64 bits wide, so an event index past this can't be represented
 constexpr int kMaxEventIndex = 64;
 
-// Added by Legion Builds (ngc-host, API 5): a builtin function the host supplies (os*, iw*, bot*) is called through its
-// own module, ossl, iw or bot, with the prefix dropped, where the runtime's own functions are called through ll.
-static const char* builtinModuleOf(const std::string& name)
+// Modules an embedding program registered for builtin functions of its own, as (prefix, module) pairs.
+static std::vector<std::pair<std::string, std::string>> sBuiltinModules;
+
+void registerLSLBuiltinModule(const std::string &prefix, const std::string &module)
 {
-    if (name.compare(0, 2, "os") == 0)
-        return "ossl";
-    if (name.compare(0, 2, "iw") == 0)
-        return "iw";
-    if (name.compare(0, 3, "bot") == 0)
-        return "bot";
-    return "ll";
+    sBuiltinModules.emplace_back(prefix, module);
 }
 
-static size_t builtinPrefixLengthOf(const std::string& name)
+void clearLSLBuiltinModules()
 {
-    return name.compare(0, 3, "bot") == 0 ? 3 : 2;
+    sBuiltinModules.clear();
+}
+
+// The module a builtin function is imported from, and in prefix_len the length of the name prefix to drop.
+static const char* builtinModuleOf(const std::string& name, size_t* prefix_len)
+{
+    const char* module = "ll";
+    *prefix_len = name.find("ll") == 0 ? 2 : 0;
+    for (const auto& [prefix, mod] : sBuiltinModules)
+    {
+        if (prefix.size() > *prefix_len && name.compare(0, prefix.size(), prefix) == 0)
+        {
+            module = mod.c_str();
+            *prefix_len = prefix.size();
+        }
+    }
+    LUAU_ASSERT(*prefix_len != 0);
+    return module;
 }
 
 static Luau::Location convertLoc(TailslideLType *loc)
@@ -1713,9 +1725,10 @@ bool LuauVisitor::visit(LSLFunctionExpression *func_expr)
     {
         // Chop off the leading `ll`, It's superfluous because these
         // functions will all live in the `ll` module.
-        // (A function the host supplies lives in the ossl, iw or bot module instead.)
+        // (A builtin function an embedding program added may live in a module it registered.)
+        size_t prefix_len;
         nodeSymIdToConstant(func_expr);
-        pushImport(func_reg, builtinModuleOf(func_sym->getName()), _mSymbolNames[func_sym].c_str());
+        pushImport(func_reg, builtinModuleOf(func_sym->getName(), &prefix_len), _mSymbolNames[func_sym].c_str());
     }
     else
     {
@@ -2085,9 +2098,10 @@ int16_t LuauVisitor::nodeSymIdToConstant(LSLASTNode* node, bool string_only)
         {
             // Chop off the leading `ll`, It's superfluous because these
             // functions will all live in the `ll` module.
-            // (For a function the host supplies, the leading `os`, `iw` or `bot`.)
-            LUAU_ASSERT(name.find("ll") == 0 || std::string(builtinModuleOf(name)) != "ll");
-            name = name.substr(builtinPrefixLengthOf(name));
+            // (Or the prefix of a module an embedding program registered.)
+            size_t prefix_len;
+            builtinModuleOf(name, &prefix_len);
+            name = name.substr(prefix_len);
         }
         else
         {

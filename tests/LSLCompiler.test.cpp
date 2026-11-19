@@ -8,10 +8,43 @@
 
 #include "doctest.h"
 
+#include <tailslide/allocator.hh>
+#include <tailslide/passes/type_checking.hh>
+
 #include <cstdlib>
 #include <cstring>
 
 using namespace Luau;
+
+namespace Tailslide
+{
+extern LSLSymbolTable gBuiltinsSymbolTable;
+}
+
+// A builtin function an embedding program defines, as it would: one integer parameter, the given result type
+static Tailslide::LSLSymbol* defineEmbedderFunction(Tailslide::ScriptAllocator& alloc, const char* name, Tailslide::LSLIType ret, Tailslide::LSLIType param)
+{
+    auto* dec = alloc.newTracked<Tailslide::LSLFunctionDec>();
+    dec->pushChild(alloc.newTracked<Tailslide::LSLIdentifier>(Tailslide::LSLType::get(param), alloc.copyStr("a")));
+    return alloc.newTracked<Tailslide::LSLSymbol>(
+        alloc.copyStr(name), Tailslide::LSLType::get(ret), Tailslide::SYM_FUNCTION, Tailslide::SYM_BUILTIN, dec);
+}
+
+static std::string compileErrorOf(const char* source)
+{
+    BytecodeBuilder bcb;
+    try
+    {
+        compileLSLOrThrow(bcb, source);
+    }
+    catch (const ParseErrors& e)
+    {
+        return e.getErrors().front().getMessage();
+    }
+    return "";
+}
+
+static Tailslide::LSLSymbol* gOtherSignature = nullptr;
 
 TEST_SUITE_BEGIN("LSLCompiler");
 
@@ -305,6 +338,66 @@ default {
 
     // If we get here, compilation succeeded
     CHECK(bcb.getBytecode().size() > 0);
+}
+
+TEST_CASE("EmbedderBuiltinModule")
+{
+    Tailslide::ScriptAllocator alloc;
+    auto* sym = defineEmbedderFunction(alloc, "xyGreet", Tailslide::LST_NULL, Tailslide::LST_INTEGER);
+    Tailslide::gBuiltinsSymbolTable.define(sym);
+    const char* source = "default { state_entry() { xyGreet(1); llSay(0, \"x\"); } }";
+
+    // Nothing registered: imported from `ll` under its whole name less two letters, as before
+    std::string plain = compileLSL(source);
+    registerLSLBuiltinModule("xy", "xymod");
+    std::string registered = compileLSL(source);
+    clearLSLBuiltinModules();
+    std::string cleared = compileLSL(source);
+    Tailslide::gBuiltinsSymbolTable.remove(sym);
+
+    REQUIRE(registered.size() > 0);
+    CHECK(registered[0] != 0);
+    CHECK(registered.find("xymod") != std::string::npos);
+    CHECK(registered.find("Greet") != std::string::npos);
+    CHECK(registered.find("xyGreet") == std::string::npos);
+    CHECK(plain.find("xymod") == std::string::npos);
+    CHECK(plain.find("Greet") != std::string::npos);
+    CHECK(cleared == plain);
+}
+
+TEST_CASE("EmbedderBuiltinCallResolver")
+{
+    Tailslide::ScriptAllocator alloc;
+    // Two signatures of one name: the table holds the integer one, the embedder keeps the string one
+    auto* first = defineEmbedderFunction(alloc, "xyPick", Tailslide::LST_INTEGER, Tailslide::LST_INTEGER);
+    gOtherSignature = defineEmbedderFunction(alloc, "xyPick", Tailslide::LST_STRING, Tailslide::LST_STRING);
+    Tailslide::gBuiltinsSymbolTable.define(first);
+    const char* takesString = "default { state_entry() { string s = xyPick(\"a\"); } }";
+    const char* ambiguous = "default { state_entry() { xyPick(1); } }";
+
+    std::string withoutResolver = compileErrorOf(takesString);
+
+    Tailslide::setBuiltinCallResolver(
+        [](Tailslide::LSLSymbol* sym, Tailslide::LSLFunctionExpression* call) -> Tailslide::LSLSymbol*
+        {
+            if (strcmp(sym->getName(), "xyPick") != 0)
+                return sym;
+            auto* arg = (Tailslide::LSLExpression*)call->getArguments()->getChild(0);
+            if (arg->getIType() == Tailslide::LST_STRING)
+                return gOtherSignature;
+            NODE_ERROR(call, Tailslide::E_AMBIGUOUS_OVERLOAD, "xyPick", "xyPick(integer)", "xyPick(integer)");
+            return nullptr;
+        }
+    );
+    std::string withResolver = compileErrorOf(takesString);
+    std::string reported = compileErrorOf(ambiguous);
+    Tailslide::setBuiltinCallResolver(nullptr);
+    Tailslide::gBuiltinsSymbolTable.remove(first);
+    gOtherSignature = nullptr;
+
+    CHECK(!withoutResolver.empty());
+    CHECK(withResolver.empty());
+    CHECK_NE(reported.find("is ambiguous"), std::string::npos);
 }
 
 TEST_SUITE_END();

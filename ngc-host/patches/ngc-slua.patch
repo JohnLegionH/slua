@@ -1,52 +1,84 @@
+diff --git a/Compiler/include/Luau/LSLCompiler.h b/Compiler/include/Luau/LSLCompiler.h
+index d152ed0e..82382eaa 100644
+--- a/Compiler/include/Luau/LSLCompiler.h
++++ b/Compiler/include/Luau/LSLCompiler.h
+@@ -171,4 +171,13 @@ std::string compileLSL(const std::string &source, LSLScriptInfo *info = nullptr,
+ 
+ std::string compileLSLAssetOrThrow(const std::string &source, uint32_t apiVersion = 0, bool debugLines = false);
+ 
++// A program embedding the compiler may define builtin functions of its own in Tailslide's builtin symbol table.
++// A call to a builtin function compiles to an import from the `ll` module with the leading `ll` dropped
++// (`llSay` is `ll.Say`). A registered module takes the builtin functions whose names start with `prefix`
++// instead, with `prefix` dropped: prefix "os" and module "ossl" make `osFoo` compile as `ossl.Foo`.
++// The longest matching prefix wins; the prefix `ll` itself stays `ll`. Register before compiling, not during a compile.
++// With nothing registered the compiler's output is unchanged. (Added by Legion Builds.)
++void registerLSLBuiltinModule(const std::string &prefix, const std::string &module);
++void clearLSLBuiltinModules();
++
+ #endif // LUAU_LSLCOMPILER_H
 diff --git a/Compiler/src/LSLCompiler.cpp b/Compiler/src/LSLCompiler.cpp
-index 0befe962..6d62250c 100644
+index 0befe962..0244abb3 100644
 --- a/Compiler/src/LSLCompiler.cpp
 +++ b/Compiler/src/LSLCompiler.cpp
-@@ -25,6 +25,24 @@ constexpr uint32_t kMaxStringImportRef = 1024;
+@@ -25,6 +25,36 @@ constexpr uint32_t kMaxStringImportRef = 1024;
  // Masks are 64 bits wide, so an event index past this can't be represented
  constexpr int kMaxEventIndex = 64;
  
-+// Added by Legion Builds (ngc-host, API 5): a builtin function the host supplies (os*, iw*, bot*) is called through its
-+// own module, ossl, iw or bot, with the prefix dropped, where the runtime's own functions are called through ll.
-+static const char* builtinModuleOf(const std::string& name)
++// Modules an embedding program registered for builtin functions of its own, as (prefix, module) pairs.
++static std::vector<std::pair<std::string, std::string>> sBuiltinModules;
++
++void registerLSLBuiltinModule(const std::string &prefix, const std::string &module)
 +{
-+    if (name.compare(0, 2, "os") == 0)
-+        return "ossl";
-+    if (name.compare(0, 2, "iw") == 0)
-+        return "iw";
-+    if (name.compare(0, 3, "bot") == 0)
-+        return "bot";
-+    return "ll";
++    sBuiltinModules.emplace_back(prefix, module);
 +}
 +
-+static size_t builtinPrefixLengthOf(const std::string& name)
++void clearLSLBuiltinModules()
 +{
-+    return name.compare(0, 3, "bot") == 0 ? 3 : 2;
++    sBuiltinModules.clear();
++}
++
++// The module a builtin function is imported from, and in prefix_len the length of the name prefix to drop.
++static const char* builtinModuleOf(const std::string& name, size_t* prefix_len)
++{
++    const char* module = "ll";
++    *prefix_len = name.find("ll") == 0 ? 2 : 0;
++    for (const auto& [prefix, mod] : sBuiltinModules)
++    {
++        if (prefix.size() > *prefix_len && name.compare(0, prefix.size(), prefix) == 0)
++        {
++            module = mod.c_str();
++            *prefix_len = prefix.size();
++        }
++    }
++    LUAU_ASSERT(*prefix_len != 0);
++    return module;
 +}
 +
  static Luau::Location convertLoc(TailslideLType *loc)
  {
      if (loc == nullptr)
-@@ -1695,8 +1713,9 @@ bool LuauVisitor::visit(LSLFunctionExpression *func_expr)
+@@ -1695,8 +1725,10 @@ bool LuauVisitor::visit(LSLFunctionExpression *func_expr)
      {
          // Chop off the leading `ll`, It's superfluous because these
          // functions will all live in the `ll` module.
-+        // (A function the host supplies lives in the ossl, iw or bot module instead.)
++        // (A builtin function an embedding program added may live in a module it registered.)
++        size_t prefix_len;
          nodeSymIdToConstant(func_expr);
 -        pushImport(func_reg, "ll", _mSymbolNames[func_sym].c_str());
-+        pushImport(func_reg, builtinModuleOf(func_sym->getName()), _mSymbolNames[func_sym].c_str());
++        pushImport(func_reg, builtinModuleOf(func_sym->getName(), &prefix_len), _mSymbolNames[func_sym].c_str());
      }
      else
      {
-@@ -2066,8 +2085,9 @@ int16_t LuauVisitor::nodeSymIdToConstant(LSLASTNode* node, bool string_only)
+@@ -2066,8 +2098,10 @@ int16_t LuauVisitor::nodeSymIdToConstant(LSLASTNode* node, bool string_only)
          {
              // Chop off the leading `ll`, It's superfluous because these
              // functions will all live in the `ll` module.
 -            LUAU_ASSERT(name.find("ll") == 0);
 -            name = name.substr(2);
-+            // (For a function the host supplies, the leading `os`, `iw` or `bot`.)
-+            LUAU_ASSERT(name.find("ll") == 0 || std::string(builtinModuleOf(name)) != "ll");
-+            name = name.substr(builtinPrefixLengthOf(name));
++            // (Or the prefix of a module an embedding program registered.)
++            size_t prefix_len;
++            builtinModuleOf(name, &prefix_len);
++            name = name.substr(prefix_len);
          }
          else
          {
@@ -65,164 +97,184 @@ index b228b11b..fb8958de 100644
  
  const char *Logger::_sWarningMessages[W_LAST - W_WARNING] = {
 diff --git a/Tailslide/tailslide/logger.hh b/Tailslide/tailslide/logger.hh
-index 13999547..51bef923 100644
+index 13999547..e5b21c64 100644
 --- a/Tailslide/tailslide/logger.hh
 +++ b/Tailslide/tailslide/logger.hh
 @@ -64,6 +64,7 @@ enum ErrorCode {
      E_STACK_HEAP_COLLISION = 10037,
      E_VOID_IN_CONDITION = 10038,
      E_NESTING_TOO_DEEP = 10039,
-+    E_AMBIGUOUS_OVERLOAD = 10040,   // Added by Legion Builds (ngc-host, API 5)
++    E_AMBIGUOUS_OVERLOAD = 10040,   // for a BuiltinCallResolver (passes/type_checking.hh); added by Legion Builds
      E_LAST,
  
  
 diff --git a/Tailslide/tailslide/passes/type_checking.cc b/Tailslide/tailslide/passes/type_checking.cc
-index 73739d3e..ccb35981 100644
+index 73739d3e..35b97695 100644
 --- a/Tailslide/tailslide/passes/type_checking.cc
 +++ b/Tailslide/tailslide/passes/type_checking.cc
-@@ -312,6 +312,92 @@ static bool validate_func_arg_spec(
+@@ -312,6 +312,12 @@ static bool validate_func_arg_spec(
    return true;
  }
  
-+// Added by Legion Builds (ngc-host, API 5): a function the host supplies may have several signatures under one name (they are
-+// chained from the symbol the table holds). The call takes the one the Phlox script engine's compiler would take: only
-+// signatures with the call's number of arguments are candidates; an argument scores 2 when its type is the parameter's and
-+// 1 when LSL converts it implicitly (integer to float, key and string either way); a signature an argument cannot reach is
-+// out; the best total wins. An argument of unknown type (one that already has an error) fits anything and scores nothing.
-+static bool overloadWidens(LSLIType from, LSLIType to) {
-+  return (from == LST_INTEGER && to == LST_FLOATINGPOINT)
-+      || (from == LST_KEY && to == LST_STRING)
-+      || (from == LST_STRING && to == LST_KEY);
-+}
++static BuiltinCallResolver sBuiltinCallResolver = nullptr;
 +
-+static const char *overloadTypeName(LSLIType t) {
-+  switch (t) {
-+    case LST_INTEGER: return "integer";
-+    case LST_FLOATINGPOINT: return "float";
-+    case LST_STRING: return "string";
-+    case LST_KEY: return "key";
-+    case LST_VECTOR: return "vector";
-+    case LST_QUATERNION: return "rotation";
-+    case LST_LIST: return "list";
-+    default: return "void";
-+  }
-+}
-+
-+static std::string describeOverload(LSLSymbol *sym) {
-+  std::string out = std::string(sym->getName()) + "(";
-+  auto *decl = sym->getFunctionDecl();
-+  for (int i = 0; decl != nullptr && i < decl->getNumChildren(); ++i) {
-+    if (i > 0)
-+      out += ", ";
-+    out += overloadTypeName(decl->getChild(i)->getType()->getIType());
-+  }
-+  return out + ")";
-+}
-+
-+// Returns the signature the call takes. With no candidate it returns the first signature of the call's number of arguments,
-+// or the first signature, so that the ordinary argument errors name the function. A tie sets tied_with.
-+static LSLSymbol *selectHostOverload(LSLSymbol *head, LSLASTNode *args, LSLSymbol **tied_with) {
-+  *tied_with = nullptr;
-+  int arg_count = args->getNumChildren();
-+  int known = 0;
-+  for (int i = 0; i < arg_count; ++i)
-+    if (((LSLExpression *)args->getChild(i))->getIType() != LST_ERROR)
-+      ++known;
-+
-+  LSLSymbol *best = nullptr, *tie = nullptr, *same_length = nullptr;
-+  int best_score = -1;
-+  for (LSLSymbol *sig = head; sig != nullptr; sig = sig->getNextOverload()) {
-+    auto *decl = sig->getFunctionDecl();
-+    if ((decl ? decl->getNumChildren() : 0) != arg_count)
-+      continue;
-+    if (same_length == nullptr)
-+      same_length = sig;
-+    if (known == 0)
-+      return sig;
-+    int score = 0;
-+    bool viable = true;
-+    for (int i = 0; i < arg_count && viable; ++i) {
-+      LSLIType given = ((LSLExpression *)args->getChild(i))->getIType();
-+      if (given == LST_ERROR)
-+        continue;
-+      LSLIType wanted = decl->getChild(i)->getType()->getIType();
-+      if (given == wanted)
-+        score += 2;
-+      else if (overloadWidens(given, wanted))
-+        score += 1;
-+      else
-+        viable = false;
-+    }
-+    if (!viable)
-+      continue;
-+    if (score > best_score) {
-+      best = sig;
-+      best_score = score;
-+      tie = nullptr;
-+    } else if (score == best_score) {
-+      tie = sig;
-+    }
-+  }
-+  if (best != nullptr && tie != nullptr)
-+    *tied_with = tie;
-+  if (best != nullptr)
-+    return best;
-+  return same_length != nullptr ? same_length : head;
++void setBuiltinCallResolver(BuiltinCallResolver resolver) {
++  sBuiltinCallResolver = resolver;
 +}
 +
  bool TypeCheckVisitor::visit(LSLFunctionExpression *func_expr) {
    auto *id = func_expr->getIdentifier();
    auto *sym = func_expr->getSymbol();
-@@ -323,6 +409,24 @@ bool TypeCheckVisitor::visit(LSLFunctionExpression *func_expr) {
+@@ -323,6 +329,21 @@ bool TypeCheckVisitor::visit(LSLFunctionExpression *func_expr) {
      return true;
    }
  
-+  // Added by Legion Builds (ngc-host, API 5): pick among the signatures of a host function, now that the arguments have
-+  // their types, and let the call (its symbol, its result type, the conversions of its arguments) follow the one picked.
-+  if (sym->getOverloadHead() != nullptr) {
-+    LSLSymbol *tied_with = nullptr;
-+    LSLSymbol *chosen = selectHostOverload(sym->getOverloadHead(), func_expr->getArguments(), &tied_with);
++  // let an embedding program pick among the signatures of a builtin function of its own
++  if (sBuiltinCallResolver != nullptr && sym->getSubType() == SYM_BUILTIN) {
++    LSLSymbol *chosen = sBuiltinCallResolver(sym, func_expr);
++    if (chosen == nullptr) {
++      func_expr->setType(TYPE(LST_ERROR));
++      return true;
++    }
 +    if (chosen != sym) {
 +      id->setSymbol(chosen);
 +      id->setType(chosen->getType());
 +      func_expr->setType(chosen->getType());
 +      sym = chosen;
 +    }
-+    if (tied_with != nullptr) {
-+      NODE_ERROR(func_expr, E_AMBIGUOUS_OVERLOAD, id->getName(), describeOverload(chosen).c_str(), describeOverload(tied_with).c_str());
-+      func_expr->setType(TYPE(LST_ERROR));
-+      return true;
-+    }
 +  }
 +
    validate_func_arg_spec(id, func_expr, func_expr->getArguments(), sym->getFunctionDecl());
    return true;
  }
-diff --git a/Tailslide/tailslide/symtab.hh b/Tailslide/tailslide/symtab.hh
-index b223bc3e..c0cd3e76 100644
---- a/Tailslide/tailslide/symtab.hh
-+++ b/Tailslide/tailslide/symtab.hh
-@@ -92,6 +92,14 @@ class LSLSymbol: public TrackableObject {
-     int getEventIndex() const { return _mEventIndex; }
-     void setEventIndex(int event_index) { _mEventIndex = event_index; }
- 
-+    // Added by Legion Builds (ngc-host, API 5): a function the host supplies may have several signatures under one name.
-+    // The symbol table holds the first; the others follow it through this pointer, in the order the host listed them.
-+    LSLSymbol *getNextOverload() { return _mNextOverload; }
-+    void setNextOverload(LSLSymbol *next) { _mNextOverload = next; }
-+    // The first signature of the name, set on every signature of a name that has several (null for a name with one).
-+    LSLSymbol *getOverloadHead() { return _mOverloadHead; }
-+    void setOverloadHead(LSLSymbol *head) { _mOverloadHead = head; }
-+
-   private:
-     const char          *_mName;
-     class LSLType  *_mType;
-@@ -112,6 +120,8 @@ class LSLSymbol: public TrackableObject {
-     // if the function contains jumps that are not break-like or continue-like
-     bool _mHasUnstructuredJumps = false;
-     int _mEventIndex = 0;
-+    LSLSymbol *_mNextOverload = nullptr;
-+    LSLSymbol *_mOverloadHead = nullptr;
+diff --git a/Tailslide/tailslide/passes/type_checking.hh b/Tailslide/tailslide/passes/type_checking.hh
+index e2951c30..532d543a 100644
+--- a/Tailslide/tailslide/passes/type_checking.hh
++++ b/Tailslide/tailslide/passes/type_checking.hh
+@@ -29,4 +29,12 @@ class TypeCheckVisitor: public DepthFirstASTVisitor {
+     void handleDeclaration(LSLASTNode *decl_node);
+     void validateCheckExpr(LSLExpression *check_expr);
  };
++
++// A program embedding Tailslide may give a builtin function of its own several signatures: it defines one in the
++// builtin symbol table and keeps the others itself. A resolver it sets is called for each call to a builtin function
++// once the arguments have their types. It returns the signature the call takes (`sym` when there is nothing to
++// choose), and the call's symbol and type follow it; or null after reporting an error on the call, for example
++// E_AMBIGUOUS_OVERLOAD. Set it before checking scripts, not during a check. No resolver: no change. (Added by Legion Builds.)
++typedef LSLSymbol *(*BuiltinCallResolver)(LSLSymbol *sym, LSLFunctionExpression *call);
++void setBuiltinCallResolver(BuiltinCallResolver resolver);
+ }
+diff --git a/tests/LSLCompiler.test.cpp b/tests/LSLCompiler.test.cpp
+index a3a41d2c..6734a256 100644
+--- a/tests/LSLCompiler.test.cpp
++++ b/tests/LSLCompiler.test.cpp
+@@ -8,11 +8,44 @@
  
- class LSLSymbolTable: public TrackableObject {
+ #include "doctest.h"
+ 
++#include <tailslide/allocator.hh>
++#include <tailslide/passes/type_checking.hh>
++
+ #include <cstdlib>
+ #include <cstring>
+ 
+ using namespace Luau;
+ 
++namespace Tailslide
++{
++extern LSLSymbolTable gBuiltinsSymbolTable;
++}
++
++// A builtin function an embedding program defines, as it would: one integer parameter, the given result type
++static Tailslide::LSLSymbol* defineEmbedderFunction(Tailslide::ScriptAllocator& alloc, const char* name, Tailslide::LSLIType ret, Tailslide::LSLIType param)
++{
++    auto* dec = alloc.newTracked<Tailslide::LSLFunctionDec>();
++    dec->pushChild(alloc.newTracked<Tailslide::LSLIdentifier>(Tailslide::LSLType::get(param), alloc.copyStr("a")));
++    return alloc.newTracked<Tailslide::LSLSymbol>(
++        alloc.copyStr(name), Tailslide::LSLType::get(ret), Tailslide::SYM_FUNCTION, Tailslide::SYM_BUILTIN, dec);
++}
++
++static std::string compileErrorOf(const char* source)
++{
++    BytecodeBuilder bcb;
++    try
++    {
++        compileLSLOrThrow(bcb, source);
++    }
++    catch (const ParseErrors& e)
++    {
++        return e.getErrors().front().getMessage();
++    }
++    return "";
++}
++
++static Tailslide::LSLSymbol* gOtherSignature = nullptr;
++
+ TEST_SUITE_BEGIN("LSLCompiler");
+ 
+ TEST_CASE("StateHandlerMasks")
+@@ -307,4 +340,64 @@ default {
+     CHECK(bcb.getBytecode().size() > 0);
+ }
+ 
++TEST_CASE("EmbedderBuiltinModule")
++{
++    Tailslide::ScriptAllocator alloc;
++    auto* sym = defineEmbedderFunction(alloc, "xyGreet", Tailslide::LST_NULL, Tailslide::LST_INTEGER);
++    Tailslide::gBuiltinsSymbolTable.define(sym);
++    const char* source = "default { state_entry() { xyGreet(1); llSay(0, \"x\"); } }";
++
++    // Nothing registered: imported from `ll` under its whole name less two letters, as before
++    std::string plain = compileLSL(source);
++    registerLSLBuiltinModule("xy", "xymod");
++    std::string registered = compileLSL(source);
++    clearLSLBuiltinModules();
++    std::string cleared = compileLSL(source);
++    Tailslide::gBuiltinsSymbolTable.remove(sym);
++
++    REQUIRE(registered.size() > 0);
++    CHECK(registered[0] != 0);
++    CHECK(registered.find("xymod") != std::string::npos);
++    CHECK(registered.find("Greet") != std::string::npos);
++    CHECK(registered.find("xyGreet") == std::string::npos);
++    CHECK(plain.find("xymod") == std::string::npos);
++    CHECK(plain.find("Greet") != std::string::npos);
++    CHECK(cleared == plain);
++}
++
++TEST_CASE("EmbedderBuiltinCallResolver")
++{
++    Tailslide::ScriptAllocator alloc;
++    // Two signatures of one name: the table holds the integer one, the embedder keeps the string one
++    auto* first = defineEmbedderFunction(alloc, "xyPick", Tailslide::LST_INTEGER, Tailslide::LST_INTEGER);
++    gOtherSignature = defineEmbedderFunction(alloc, "xyPick", Tailslide::LST_STRING, Tailslide::LST_STRING);
++    Tailslide::gBuiltinsSymbolTable.define(first);
++    const char* takesString = "default { state_entry() { string s = xyPick(\"a\"); } }";
++    const char* ambiguous = "default { state_entry() { xyPick(1); } }";
++
++    std::string withoutResolver = compileErrorOf(takesString);
++
++    Tailslide::setBuiltinCallResolver(
++        [](Tailslide::LSLSymbol* sym, Tailslide::LSLFunctionExpression* call) -> Tailslide::LSLSymbol*
++        {
++            if (strcmp(sym->getName(), "xyPick") != 0)
++                return sym;
++            auto* arg = (Tailslide::LSLExpression*)call->getArguments()->getChild(0);
++            if (arg->getIType() == Tailslide::LST_STRING)
++                return gOtherSignature;
++            NODE_ERROR(call, Tailslide::E_AMBIGUOUS_OVERLOAD, "xyPick", "xyPick(integer)", "xyPick(integer)");
++            return nullptr;
++        }
++    );
++    std::string withResolver = compileErrorOf(takesString);
++    std::string reported = compileErrorOf(ambiguous);
++    Tailslide::setBuiltinCallResolver(nullptr);
++    Tailslide::gBuiltinsSymbolTable.remove(first);
++    gOtherSignature = nullptr;
++
++    CHECK(!withoutResolver.empty());
++    CHECK(withResolver.empty());
++    CHECK_NE(reported.find("is ambiguous"), std::string::npos);
++}
++
+ TEST_SUITE_END();

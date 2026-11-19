@@ -22,6 +22,8 @@
 
 #include <tailslide/allocator.hh>
 #include <tailslide/lslmini.hh>
+#include <tailslide/logger.hh>
+#include <tailslide/passes/type_checking.hh>
 
 #include <algorithm>
 #include <atomic>
@@ -38,6 +40,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #if defined(_WIN32)
@@ -802,6 +805,121 @@ namespace
 std::shared_mutex gHostFnMutex;
 Tailslide::ScriptAllocator gHostFnAllocator;
 std::vector<Tailslide::LSLSymbol*> gHostFnSymbols;
+// For a name listed with several signatures: the symbol the table holds (the first listed) to all of them, in the order listed.
+std::unordered_map<Tailslide::LSLSymbol*, std::vector<Tailslide::LSLSymbol*>> gHostFnOverloads;
+
+// A call to a host function with several signatures takes the one the Phlox script engine's compiler would take: only
+// signatures with the call's number of arguments are candidates; an argument scores 2 when its type is the parameter's and
+// 1 when LSL converts it implicitly (integer to float, key and string either way); a signature an argument cannot reach is
+// out; the best total wins. An argument of unknown type (one that already has an error) fits anything and scores nothing.
+bool overloadWidens(Tailslide::LSLIType from, Tailslide::LSLIType to)
+{
+    return (from == Tailslide::LST_INTEGER && to == Tailslide::LST_FLOATINGPOINT) || (from == Tailslide::LST_KEY && to == Tailslide::LST_STRING) ||
+           (from == Tailslide::LST_STRING && to == Tailslide::LST_KEY);
+}
+
+const char* overloadTypeName(Tailslide::LSLIType t)
+{
+    switch (t)
+    {
+    case Tailslide::LST_INTEGER: return "integer";
+    case Tailslide::LST_FLOATINGPOINT: return "float";
+    case Tailslide::LST_STRING: return "string";
+    case Tailslide::LST_KEY: return "key";
+    case Tailslide::LST_VECTOR: return "vector";
+    case Tailslide::LST_QUATERNION: return "rotation";
+    case Tailslide::LST_LIST: return "list";
+    default: return "void";
+    }
+}
+
+std::string describeOverload(Tailslide::LSLSymbol* sym)
+{
+    std::string out = std::string(sym->getName()) + "(";
+    auto* decl = sym->getFunctionDecl();
+    for (int i = 0; decl != nullptr && i < decl->getNumChildren(); ++i)
+    {
+        if (i > 0)
+            out += ", ";
+        out += overloadTypeName(decl->getChild(i)->getType()->getIType());
+    }
+    return out + ")";
+}
+
+// Returns the signature the call takes. With no candidate it returns the first signature of the call's number of arguments,
+// or the first signature, so that the ordinary argument errors name the function. A tie sets tied_with.
+Tailslide::LSLSymbol* selectHostOverload(const std::vector<Tailslide::LSLSymbol*>& sigs, Tailslide::LSLASTNode* args, Tailslide::LSLSymbol** tied_with)
+{
+    *tied_with = nullptr;
+    int arg_count = args->getNumChildren();
+    int known = 0;
+    for (int i = 0; i < arg_count; ++i)
+        if (((Tailslide::LSLExpression*)args->getChild(i))->getIType() != Tailslide::LST_ERROR)
+            ++known;
+
+    Tailslide::LSLSymbol *best = nullptr, *tie = nullptr, *same_length = nullptr;
+    int best_score = -1;
+    for (Tailslide::LSLSymbol* sig : sigs)
+    {
+        auto* decl = sig->getFunctionDecl();
+        if ((decl ? decl->getNumChildren() : 0) != arg_count)
+            continue;
+        if (same_length == nullptr)
+            same_length = sig;
+        if (known == 0)
+            return sig;
+        int score = 0;
+        bool viable = true;
+        for (int i = 0; i < arg_count && viable; ++i)
+        {
+            Tailslide::LSLIType given = ((Tailslide::LSLExpression*)args->getChild(i))->getIType();
+            if (given == Tailslide::LST_ERROR)
+                continue;
+            Tailslide::LSLIType wanted = decl->getChild(i)->getType()->getIType();
+            if (given == wanted)
+                score += 2;
+            else if (overloadWidens(given, wanted))
+                score += 1;
+            else
+                viable = false;
+        }
+        if (!viable)
+            continue;
+        if (score > best_score)
+        {
+            best = sig;
+            best_score = score;
+            tie = nullptr;
+        }
+        else if (score == best_score)
+        {
+            tie = sig;
+        }
+    }
+    if (best != nullptr && tie != nullptr)
+        *tied_with = tie;
+    if (best != nullptr)
+        return best;
+    return same_length != nullptr ? same_length : sigs.front();
+}
+
+// The compiler's BuiltinCallResolver: picks among the signatures of a host function listed more than once, and reports a tie.
+// Runs inside a compile, which holds gHostFnMutex shared.
+Tailslide::LSLSymbol* resolveHostCall(Tailslide::LSLSymbol* sym, Tailslide::LSLFunctionExpression* call)
+{
+    auto sigs = gHostFnOverloads.find(sym);
+    if (sigs == gHostFnOverloads.end())
+        return sym;
+    Tailslide::LSLSymbol* tied_with = nullptr;
+    Tailslide::LSLSymbol* chosen = selectHostOverload(sigs->second, call->getArguments(), &tied_with);
+    if (tied_with == nullptr)
+        return chosen;
+    auto* id = call->getIdentifier();
+    id->setSymbol(chosen);
+    id->setType(chosen->getType());
+    NODE_ERROR(call, Tailslide::E_AMBIGUOUS_OVERLOAD, id->getName(), describeOverload(chosen).c_str(), describeOverload(tied_with).c_str());
+    return nullptr;
+}
 
 struct HostFnSpec
 {
@@ -968,6 +1086,7 @@ SLUA_API int32_t slua_set_host_functions(const char* definitions, char** err)
     for (Tailslide::LSLSymbol* old : gHostFnSymbols)
         Tailslide::gBuiltinsSymbolTable.remove(old);
     gHostFnSymbols.clear();
+    gHostFnOverloads.clear();
     // Every name is checked against the runtime's own before anything is defined, so a refused list defines nothing.
     for (const HostFnSpec& spec : specs)
     {
@@ -978,7 +1097,7 @@ SLUA_API int32_t slua_set_host_functions(const char* definitions, char** err)
             return SLUA_ERR_BAD_ARG;
         }
     }
-    std::map<std::string, Tailslide::LSLSymbol*> lastOfName;
+    std::map<std::string, Tailslide::LSLSymbol*> firstOfName;
     for (const HostFnSpec& spec : specs)
     {
         auto* dec = gHostFnAllocator.newTracked<Tailslide::LSLFunctionDec>();
@@ -986,20 +1105,20 @@ SLUA_API int32_t slua_set_host_functions(const char* definitions, char** err)
             dec->pushChild(gHostFnAllocator.newTracked<Tailslide::LSLIdentifier>(Tailslide::LSLType::get(p.first), gHostFnAllocator.copyStr(p.second.c_str())));
         auto* sym = gHostFnAllocator.newTracked<Tailslide::LSLSymbol>(
             gHostFnAllocator.copyStr(spec.name.c_str()), Tailslide::LSLType::get(spec.ret), Tailslide::SYM_FUNCTION, Tailslide::SYM_BUILTIN, dec);
-        auto previous = lastOfName.find(spec.name);
-        if (previous == lastOfName.end())
+        auto first = firstOfName.find(spec.name);
+        if (first == firstOfName.end())
         {
             Tailslide::gBuiltinsSymbolTable.define(sym);
+            firstOfName[spec.name] = sym;
         }
         else
         {
-            // Another signature of a name already defined: it follows the first through the chain the type check walks.
-            Tailslide::LSLSymbol* head = previous->second->getOverloadHead() ? previous->second->getOverloadHead() : previous->second;
-            head->setOverloadHead(head);
-            sym->setOverloadHead(head);
-            previous->second->setNextOverload(sym);
+            // Another signature of a name already defined: resolveHostCall chooses among them for each call.
+            auto& sigs = gHostFnOverloads[first->second];
+            if (sigs.empty())
+                sigs.push_back(first->second);
+            sigs.push_back(sym);
         }
-        lastOfName[spec.name] = sym;
         gHostFnSymbols.push_back(sym);
     }
     return SLUA_OK;
@@ -1013,6 +1132,12 @@ SLUA_API int32_t slua_init(void)
         Luau::setRequiredSLuaFlags();
         luauSL_init_global_builtins(nullptr);
         Tailslide::tailslide_init_builtins(nullptr);
+        // The host's os*, iw* and bot* functions are called through the ossl, iw and bot modules (prefix dropped), and a
+        // name the host lists with several signatures takes the signature resolveHostCall picks.
+        registerLSLBuiltinModule("os", "ossl");
+        registerLSLBuiltinModule("iw", "iw");
+        registerLSLBuiltinModule("bot", "bot");
+        Tailslide::setBuiltinCallResolver(&resolveHostCall);
         logCallback() = logAdapter;
     });
     return SLUA_OK;
