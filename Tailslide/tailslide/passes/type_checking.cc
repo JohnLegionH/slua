@@ -312,6 +312,12 @@ static bool validate_func_arg_spec(
   return true;
 }
 
+static BuiltinCallResolver sBuiltinCallResolver = nullptr;
+
+void setBuiltinCallResolver(BuiltinCallResolver resolver) {
+  sBuiltinCallResolver = resolver;
+}
+
 bool TypeCheckVisitor::visit(LSLFunctionExpression *func_expr) {
   auto *id = func_expr->getIdentifier();
   auto *sym = func_expr->getSymbol();
@@ -321,6 +327,21 @@ bool TypeCheckVisitor::visit(LSLFunctionExpression *func_expr) {
   if (sym == nullptr) {
     func_expr->setType(TYPE(LST_ERROR));
     return true;
+  }
+
+  // let an embedding program pick among the signatures of a builtin function of its own
+  if (sBuiltinCallResolver != nullptr && sym->getSubType() == SYM_BUILTIN) {
+    LSLSymbol *chosen = sBuiltinCallResolver(sym, func_expr);
+    if (chosen == nullptr) {
+      func_expr->setType(TYPE(LST_ERROR));
+      return true;
+    }
+    if (chosen != sym) {
+      id->setSymbol(chosen);
+      id->setType(chosen->getType());
+      func_expr->setType(chosen->getType());
+      sym = chosen;
+    }
   }
 
   validate_func_arg_spec(id, func_expr, func_expr->getArguments(), sym->getFunctionDecl());

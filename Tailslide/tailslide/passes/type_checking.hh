@@ -29,4 +29,12 @@ class TypeCheckVisitor: public DepthFirstASTVisitor {
     void handleDeclaration(LSLASTNode *decl_node);
     void validateCheckExpr(LSLExpression *check_expr);
 };
+
+// A program embedding Tailslide may give a builtin function of its own several signatures: it defines one in the
+// builtin symbol table and keeps the others itself. A resolver it sets is called for each call to a builtin function
+// once the arguments have their types. It returns the signature the call takes (`sym` when there is nothing to
+// choose), and the call's symbol and type follow it; or null after reporting an error on the call, for example
+// E_AMBIGUOUS_OVERLOAD. Set it before checking scripts, not during a check. No resolver: no change. (Added by Legion Builds.)
+typedef LSLSymbol *(*BuiltinCallResolver)(LSLSymbol *sym, LSLFunctionExpression *call);
+void setBuiltinCallResolver(BuiltinCallResolver resolver);
 }

@@ -171,4 +171,13 @@ std::string compileLSL(const std::string &source, LSLScriptInfo *info = nullptr,
 
 std::string compileLSLAssetOrThrow(const std::string &source, uint32_t apiVersion = 0, bool debugLines = false);
 
+// A program embedding the compiler may define builtin functions of its own in Tailslide's builtin symbol table.
+// A call to a builtin function compiles to an import from the `ll` module with the leading `ll` dropped
+// (`llSay` is `ll.Say`). A registered module takes the builtin functions whose names start with `prefix`
+// instead, with `prefix` dropped: prefix "os" and module "ossl" make `osFoo` compile as `ossl.Foo`.
+// The longest matching prefix wins; the prefix `ll` itself stays `ll`. Register before compiling, not during a compile.
+// With nothing registered the compiler's output is unchanged. (Added by Legion Builds.)
+void registerLSLBuiltinModule(const std::string &prefix, const std::string &module);
+void clearLSLBuiltinModules();
+
 #endif // LUAU_LSLCOMPILER_H

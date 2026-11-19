@@ -64,6 +64,7 @@ enum ErrorCode {
     E_STACK_HEAP_COLLISION = 10037,
     E_VOID_IN_CONDITION = 10038,
     E_NESTING_TOO_DEEP = 10039,
+    E_AMBIGUOUS_OVERLOAD = 10040,   // for a BuiltinCallResolver (passes/type_checking.hh); added by Legion Builds
     E_LAST,
 
 

@@ -25,6 +25,36 @@ constexpr uint32_t kMaxStringImportRef = 1024;
 // Masks are 64 bits wide, so an event index past this can't be represented
 constexpr int kMaxEventIndex = 64;
 
+// Modules an embedding program registered for builtin functions of its own, as (prefix, module) pairs.
+static std::vector<std::pair<std::string, std::string>> sBuiltinModules;
+
+void registerLSLBuiltinModule(const std::string &prefix, const std::string &module)
+{
+    sBuiltinModules.emplace_back(prefix, module);
+}
+
+void clearLSLBuiltinModules()
+{
+    sBuiltinModules.clear();
+}
+
+// The module a builtin function is imported from, and in prefix_len the length of the name prefix to drop.
+static const char* builtinModuleOf(const std::string& name, size_t* prefix_len)
+{
+    const char* module = "ll";
+    *prefix_len = name.find("ll") == 0 ? 2 : 0;
+    for (const auto& [prefix, mod] : sBuiltinModules)
+    {
+        if (prefix.size() > *prefix_len && name.compare(0, prefix.size(), prefix) == 0)
+        {
+            module = mod.c_str();
+            *prefix_len = prefix.size();
+        }
+    }
+    LUAU_ASSERT(*prefix_len != 0);
+    return module;
+}
+
 static Luau::Location convertLoc(TailslideLType *loc)
 {
     if (loc == nullptr)
@@ -1695,8 +1725,10 @@ bool LuauVisitor::visit(LSLFunctionExpression *func_expr)
     {
         // Chop off the leading `ll`, It's superfluous because these
         // functions will all live in the `ll` module.
+        // (A builtin function an embedding program added may live in a module it registered.)
+        size_t prefix_len;
         nodeSymIdToConstant(func_expr);
-        pushImport(func_reg, "ll", _mSymbolNames[func_sym].c_str());
+        pushImport(func_reg, builtinModuleOf(func_sym->getName(), &prefix_len), _mSymbolNames[func_sym].c_str());
     }
     else
     {
@@ -2066,8 +2098,10 @@ int16_t LuauVisitor::nodeSymIdToConstant(LSLASTNode* node, bool string_only)
         {
             // Chop off the leading `ll`, It's superfluous because these
             // functions will all live in the `ll` module.
-            LUAU_ASSERT(name.find("ll") == 0);
-            name = name.substr(2);
+            // (Or the prefix of a module an embedding program registered.)
+            size_t prefix_len;
+            builtinModuleOf(name, &prefix_len);
+            name = name.substr(prefix_len);
         }
         else
         {
