@@ -1,0 +1,228 @@
+diff --git a/Compiler/src/LSLCompiler.cpp b/Compiler/src/LSLCompiler.cpp
+index 0befe962..6d62250c 100644
+--- a/Compiler/src/LSLCompiler.cpp
++++ b/Compiler/src/LSLCompiler.cpp
+@@ -25,6 +25,24 @@ constexpr uint32_t kMaxStringImportRef = 1024;
+ // Masks are 64 bits wide, so an event index past this can't be represented
+ constexpr int kMaxEventIndex = 64;
+ 
++// Added by Legion Builds (ngc-host, API 5): a builtin function the host supplies (os*, iw*, bot*) is called through its
++// own module, ossl, iw or bot, with the prefix dropped, where the runtime's own functions are called through ll.
++static const char* builtinModuleOf(const std::string& name)
++{
++    if (name.compare(0, 2, "os") == 0)
++        return "ossl";
++    if (name.compare(0, 2, "iw") == 0)
++        return "iw";
++    if (name.compare(0, 3, "bot") == 0)
++        return "bot";
++    return "ll";
++}
++
++static size_t builtinPrefixLengthOf(const std::string& name)
++{
++    return name.compare(0, 3, "bot") == 0 ? 3 : 2;
++}
++
+ static Luau::Location convertLoc(TailslideLType *loc)
+ {
+     if (loc == nullptr)
+@@ -1695,8 +1713,9 @@ bool LuauVisitor::visit(LSLFunctionExpression *func_expr)
+     {
+         // Chop off the leading `ll`, It's superfluous because these
+         // functions will all live in the `ll` module.
++        // (A function the host supplies lives in the ossl, iw or bot module instead.)
+         nodeSymIdToConstant(func_expr);
+-        pushImport(func_reg, "ll", _mSymbolNames[func_sym].c_str());
++        pushImport(func_reg, builtinModuleOf(func_sym->getName()), _mSymbolNames[func_sym].c_str());
+     }
+     else
+     {
+@@ -2066,8 +2085,9 @@ int16_t LuauVisitor::nodeSymIdToConstant(LSLASTNode* node, bool string_only)
+         {
+             // Chop off the leading `ll`, It's superfluous because these
+             // functions will all live in the `ll` module.
+-            LUAU_ASSERT(name.find("ll") == 0);
+-            name = name.substr(2);
++            // (For a function the host supplies, the leading `os`, `iw` or `bot`.)
++            LUAU_ASSERT(name.find("ll") == 0 || std::string(builtinModuleOf(name)) != "ll");
++            name = name.substr(builtinPrefixLengthOf(name));
+         }
+         else
+         {
+diff --git a/Tailslide/tailslide/logger.cc b/Tailslide/tailslide/logger.cc
+index b228b11b..fb8958de 100644
+--- a/Tailslide/tailslide/logger.cc
++++ b/Tailslide/tailslide/logger.cc
+@@ -210,7 +210,8 @@ const char *Logger::_sErrorMessages[E_LAST - E_ERROR] = {
+         "Lists may not contain nulls",
+         "Stack-heap collision",
+         "Void expression used as condition",
+-        "Nesting too deep."
++        "Nesting too deep.",
++        "Call to `%s' is ambiguous: `%s' and `%s' fit the arguments equally well."
+ };
+ 
+ const char *Logger::_sWarningMessages[W_LAST - W_WARNING] = {
+diff --git a/Tailslide/tailslide/logger.hh b/Tailslide/tailslide/logger.hh
+index 13999547..51bef923 100644
+--- a/Tailslide/tailslide/logger.hh
++++ b/Tailslide/tailslide/logger.hh
+@@ -64,6 +64,7 @@ enum ErrorCode {
+     E_STACK_HEAP_COLLISION = 10037,
+     E_VOID_IN_CONDITION = 10038,
+     E_NESTING_TOO_DEEP = 10039,
++    E_AMBIGUOUS_OVERLOAD = 10040,   // Added by Legion Builds (ngc-host, API 5)
+     E_LAST,
+ 
+ 
+diff --git a/Tailslide/tailslide/passes/type_checking.cc b/Tailslide/tailslide/passes/type_checking.cc
+index 73739d3e..ccb35981 100644
+--- a/Tailslide/tailslide/passes/type_checking.cc
++++ b/Tailslide/tailslide/passes/type_checking.cc
+@@ -312,6 +312,92 @@ static bool validate_func_arg_spec(
+   return true;
+ }
+ 
++// Added by Legion Builds (ngc-host, API 5): a function the host supplies may have several signatures under one name (they are
++// chained from the symbol the table holds). The call takes the one the Phlox script engine's compiler would take: only
++// signatures with the call's number of arguments are candidates; an argument scores 2 when its type is the parameter's and
++// 1 when LSL converts it implicitly (integer to float, key and string either way); a signature an argument cannot reach is
++// out; the best total wins. An argument of unknown type (one that already has an error) fits anything and scores nothing.
++static bool overloadWidens(LSLIType from, LSLIType to) {
++  return (from == LST_INTEGER && to == LST_FLOATINGPOINT)
++      || (from == LST_KEY && to == LST_STRING)
++      || (from == LST_STRING && to == LST_KEY);
++}
++
++static const char *overloadTypeName(LSLIType t) {
++  switch (t) {
++    case LST_INTEGER: return "integer";
++    case LST_FLOATINGPOINT: return "float";
++    case LST_STRING: return "string";
++    case LST_KEY: return "key";
++    case LST_VECTOR: return "vector";
++    case LST_QUATERNION: return "rotation";
++    case LST_LIST: return "list";
++    default: return "void";
++  }
++}
++
++static std::string describeOverload(LSLSymbol *sym) {
++  std::string out = std::string(sym->getName()) + "(";
++  auto *decl = sym->getFunctionDecl();
++  for (int i = 0; decl != nullptr && i < decl->getNumChildren(); ++i) {
++    if (i > 0)
++      out += ", ";
++    out += overloadTypeName(decl->getChild(i)->getType()->getIType());
++  }
++  return out + ")";
++}
++
++// Returns the signature the call takes. With no candidate it returns the first signature of the call's number of arguments,
++// or the first signature, so that the ordinary argument errors name the function. A tie sets tied_with.
++static LSLSymbol *selectHostOverload(LSLSymbol *head, LSLASTNode *args, LSLSymbol **tied_with) {
++  *tied_with = nullptr;
++  int arg_count = args->getNumChildren();
++  int known = 0;
++  for (int i = 0; i < arg_count; ++i)
++    if (((LSLExpression *)args->getChild(i))->getIType() != LST_ERROR)
++      ++known;
++
++  LSLSymbol *best = nullptr, *tie = nullptr, *same_length = nullptr;
++  int best_score = -1;
++  for (LSLSymbol *sig = head; sig != nullptr; sig = sig->getNextOverload()) {
++    auto *decl = sig->getFunctionDecl();
++    if ((decl ? decl->getNumChildren() : 0) != arg_count)
++      continue;
++    if (same_length == nullptr)
++      same_length = sig;
++    if (known == 0)
++      return sig;
++    int score = 0;
++    bool viable = true;
++    for (int i = 0; i < arg_count && viable; ++i) {
++      LSLIType given = ((LSLExpression *)args->getChild(i))->getIType();
++      if (given == LST_ERROR)
++        continue;
++      LSLIType wanted = decl->getChild(i)->getType()->getIType();
++      if (given == wanted)
++        score += 2;
++      else if (overloadWidens(given, wanted))
++        score += 1;
++      else
++        viable = false;
++    }
++    if (!viable)
++      continue;
++    if (score > best_score) {
++      best = sig;
++      best_score = score;
++      tie = nullptr;
++    } else if (score == best_score) {
++      tie = sig;
++    }
++  }
++  if (best != nullptr && tie != nullptr)
++    *tied_with = tie;
++  if (best != nullptr)
++    return best;
++  return same_length != nullptr ? same_length : head;
++}
++
+ bool TypeCheckVisitor::visit(LSLFunctionExpression *func_expr) {
+   auto *id = func_expr->getIdentifier();
+   auto *sym = func_expr->getSymbol();
+@@ -323,6 +409,24 @@ bool TypeCheckVisitor::visit(LSLFunctionExpression *func_expr) {
+     return true;
+   }
+ 
++  // Added by Legion Builds (ngc-host, API 5): pick among the signatures of a host function, now that the arguments have
++  // their types, and let the call (its symbol, its result type, the conversions of its arguments) follow the one picked.
++  if (sym->getOverloadHead() != nullptr) {
++    LSLSymbol *tied_with = nullptr;
++    LSLSymbol *chosen = selectHostOverload(sym->getOverloadHead(), func_expr->getArguments(), &tied_with);
++    if (chosen != sym) {
++      id->setSymbol(chosen);
++      id->setType(chosen->getType());
++      func_expr->setType(chosen->getType());
++      sym = chosen;
++    }
++    if (tied_with != nullptr) {
++      NODE_ERROR(func_expr, E_AMBIGUOUS_OVERLOAD, id->getName(), describeOverload(chosen).c_str(), describeOverload(tied_with).c_str());
++      func_expr->setType(TYPE(LST_ERROR));
++      return true;
++    }
++  }
++
+   validate_func_arg_spec(id, func_expr, func_expr->getArguments(), sym->getFunctionDecl());
+   return true;
+ }
+diff --git a/Tailslide/tailslide/symtab.hh b/Tailslide/tailslide/symtab.hh
+index b223bc3e..c0cd3e76 100644
+--- a/Tailslide/tailslide/symtab.hh
++++ b/Tailslide/tailslide/symtab.hh
+@@ -92,6 +92,14 @@ class LSLSymbol: public TrackableObject {
+     int getEventIndex() const { return _mEventIndex; }
+     void setEventIndex(int event_index) { _mEventIndex = event_index; }
+ 
++    // Added by Legion Builds (ngc-host, API 5): a function the host supplies may have several signatures under one name.
++    // The symbol table holds the first; the others follow it through this pointer, in the order the host listed them.
++    LSLSymbol *getNextOverload() { return _mNextOverload; }
++    void setNextOverload(LSLSymbol *next) { _mNextOverload = next; }
++    // The first signature of the name, set on every signature of a name that has several (null for a name with one).
++    LSLSymbol *getOverloadHead() { return _mOverloadHead; }
++    void setOverloadHead(LSLSymbol *head) { _mOverloadHead = head; }
++
+   private:
+     const char          *_mName;
+     class LSLType  *_mType;
+@@ -112,6 +120,8 @@ class LSLSymbol: public TrackableObject {
+     // if the function contains jumps that are not break-like or continue-like
+     bool _mHasUnstructuredJumps = false;
+     int _mEventIndex = 0;
++    LSLSymbol *_mNextOverload = nullptr;
++    LSLSymbol *_mOverloadHead = nullptr;
+ };
+ 
+ class LSLSymbolTable: public TrackableObject {
